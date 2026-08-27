@@ -25,6 +25,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Check source files
+        run: |
+          echo "当前目录："
+          pwd
+          echo "src目录内容："
+          ls -la src
+
       - name: Test News Data
         run: |
           python src/news_data.py
