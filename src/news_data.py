@@ -1,11 +1,15 @@
 import re
-from datetime import datetime, timezone, timedelta
 from difflib import SequenceMatcher
 
 import feedparser
 
 
+# =====================================
+# RSS 新闻源
+# =====================================
+
 NEWS_FEEDS = {
+
     "CNBC Markets":
         "https://www.cnbc.com/id/15839135/device/rss/rss.html",
 
@@ -17,96 +21,149 @@ NEWS_FEEDS = {
 
     "Yahoo Finance":
         "https://finance.yahoo.com/news/rssindex",
+
 }
 
 
-# 市场影响关键词
-IMPACT_KEYWORDS = [
+# 输出数量
 
-    # 宏观
+MAX_NEWS = 10
+
+
+
+# =====================================
+# 公司实体库
+# =====================================
+
+COMPANY_ENTITIES = {
+
+    "Nvidia": [
+        "nvidia",
+        "nvda"
+    ],
+
+    "CrowdStrike": [
+        "crowdstrike",
+        "crwd"
+    ],
+
+    "Salesforce": [
+        "salesforce",
+        "crm"
+    ],
+
+    "Apple": [
+        "apple",
+        "aapl"
+    ],
+
+    "Microsoft": [
+        "microsoft",
+        "msft"
+    ],
+
+    "Tesla": [
+        "tesla",
+        "tsla"
+    ],
+
+    "Google": [
+        "google",
+        "alphabet"
+    ],
+
+    "Amazon": [
+        "amazon",
+        "amzn"
+    ],
+
+    "TSMC": [
+        "tsmc",
+        "taiwan semiconductor"
+    ],
+
+    "ASML": [
+        "asml"
+    ],
+
+    "Okta": [
+        "okta"
+    ]
+
+}
+
+
+
+# =====================================
+# 市场关键词
+# =====================================
+
+MARKET_KEYWORDS = [
+
     "fed",
     "federal reserve",
     "fomc",
+
     "interest rate",
     "rate cut",
     "rate hike",
+
     "inflation",
     "cpi",
     "ppi",
-    "gdp",
-    "jobs",
-    "payroll",
-    "treasury",
-    "yield",
 
-    # 市场
+    "jobs",
+    "employment",
+    "payroll",
+
     "stock",
     "stocks",
+    "shares",
     "market",
-    "wall street",
-    "nasdaq",
-    "s&p",
-    "dow",
 
-    # 财报
     "earnings",
     "quarter",
     "forecast",
-    "guidance",
-    "revenue",
-    "profit",
-    "loss",
 
-    # AI科技
     "ai",
     "artificial intelligence",
+
     "semiconductor",
     "chip",
-    "memory",
-    "data center",
-
-    # 地缘
-    "china",
-    "tariff",
-    "trade",
-    "sanction",
-    "war",
-    "conflict",
-    "geopolitical",
-
-    # 商品
-    "oil",
-    "crude",
-    "gold",
-    "dollar",
-]
-
-
-# 重点公司
-IMPORTANT_COMPANIES = [
+    "gpu",
 
     "nvidia",
     "apple",
     "microsoft",
     "amazon",
     "google",
-    "alphabet",
     "meta",
     "tesla",
-    "broadcom",
-    "amd",
-    "intel",
-    "tsmc",
-    "asml",
-    "qualcomm",
-    "oracle",
-    "salesforce",
+
     "crowdstrike",
-    "alibaba",
-    "tencent",
+    "okta",
+
+    "china",
+    "trade",
+    "tariff",
+
+    "oil",
+    "gold",
+    "dollar",
+    "treasury",
+    "bond",
+    "yield",
+
+    "war",
+    "conflict"
 
 ]
 
+
+
+# =====================================
+# 文本清理
+# =====================================
 
 def clean_text(text):
 
@@ -124,98 +181,29 @@ def clean_text(text):
         text
     )
 
-    return re.sub(
+    text = re.sub(
         r"\s+",
         " ",
         text
     ).strip()
 
-
-def parse_time(entry):
-
-    try:
-
-        if hasattr(entry, "published_parsed"):
-
-            dt = datetime(
-                *entry.published_parsed[:6],
-                tzinfo=timezone.utc
-            )
-
-            return dt
-
-    except:
-
-        pass
-
-
-    return None
+    return text
 
 
 
-def is_recent(entry):
+# =====================================
+# 新闻相关判断
+# =====================================
 
-    published = parse_time(entry)
-
-    if not published:
-
-        return True
-
-
-    now = datetime.now(timezone.utc)
-
-    limit = now - timedelta(hours=36)
-
-
-    return published >= limit
-
-
-
-def is_market_related(title, summary):
+def is_market_relevant(title, summary=""):
 
     text = clean_text(
         title + " " + summary
     )
 
+    for keyword in MARKET_KEYWORDS:
 
-    score = 0
-
-
-    for word in IMPACT_KEYWORDS:
-
-        if word in text:
-
-            score += 1
-
-
-
-    for company in IMPORTANT_COMPANIES:
-
-        if company in text:
-
-            score += 2
-
-
-
-    return score >= 2
-
-
-
-def duplicate(title, titles):
-
-    title = clean_text(title)
-
-
-    for old in titles:
-
-        ratio = SequenceMatcher(
-            None,
-            title,
-            old
-        ).ratio()
-
-
-        if ratio > 0.82:
+        if keyword in text:
 
             return True
 
@@ -224,9 +212,247 @@ def duplicate(title, titles):
 
 
 
+# =====================================
+# 公司识别
+# =====================================
+
+def detect_company(title):
+
+    text = clean_text(title)
+
+
+    for company, keywords in COMPANY_ENTITIES.items():
+
+        for word in keywords:
+
+            if word in text:
+
+                return company
+
+
+    return "Other"
+
+
+
+# =====================================
+# 事件类型
+# =====================================
+
+def detect_event(title):
+
+    text = clean_text(title)
+
+
+    if any(
+        x in text
+        for x in [
+            "earnings",
+            "quarter",
+            "results"
+        ]
+    ):
+
+        return "earnings"
+
+
+    if any(
+        x in text
+        for x in [
+            "ai model",
+            "artificial intelligence",
+            "gpu"
+        ]
+    ):
+
+        return "ai"
+
+
+
+    if any(
+        x in text
+        for x in [
+            "fed",
+            "inflation",
+            "interest rate",
+            "cpi"
+        ]
+    ):
+
+        return "macro"
+
+
+    return "market"
+
+
+
+# =====================================
+# 事件ID
+# =====================================
+
+def generate_event_id(title):
+
+    company = detect_company(title)
+
+    event = detect_event(title)
+
+
+    return f"{company}_{event}"
+
+
+
+# =====================================
+# 分类
+# =====================================
+
+def classify_news(title):
+
+    text = clean_text(title)
+
+
+    if (
+        "nvidia" in text
+        or "ai" in text
+        or "gpu" in text
+    ):
+
+        return "AI/科技"
+
+
+    if (
+        "chip" in text
+        or "semiconductor" in text
+        or "tsmc" in text
+    ):
+
+        return "半导体"
+
+
+    if (
+        "crowdstrike" in text
+        or "okta" in text
+    ):
+
+        return "网络安全"
+
+
+    if (
+        "fed" in text
+        or "inflation" in text
+        or "rate" in text
+    ):
+
+        return "宏观"
+
+
+    return "公司事件"
+
+
+
+# =====================================
+# 新闻评分
+# =====================================
+
+def calculate_score(article):
+
+    text = clean_text(
+        article["title"]
+    )
+
+
+    score = 0
+
+
+    # 宏观
+
+    for word in [
+
+        "fed",
+        "fomc",
+        "inflation",
+        "cpi",
+        "interest rate",
+        "yield"
+
+    ]:
+
+        if word in text:
+
+            score += 10
+
+
+
+    # AI核心
+
+    for word in [
+
+        "nvidia",
+        "tsmc",
+        "asml",
+        "gpu",
+        "ai"
+
+    ]:
+
+        if word in text:
+
+            score += 8
+
+
+
+    # 科技巨头
+
+    for word in [
+
+        "apple",
+        "microsoft",
+        "google",
+        "amazon",
+        "tesla"
+
+    ]:
+
+        if word in text:
+
+            score += 6
+
+
+
+    # 网络安全
+
+    for word in [
+
+        "crowdstrike",
+        "okta"
+
+    ]:
+
+        if word in text:
+
+            score += 5
+
+
+
+    # 普通财报
+
+    if "earnings" in text:
+
+        score += 1
+
+
+
+    return score
+
+
+
+# =====================================
+# 获取新闻
+# =====================================
+
 def get_news_data():
 
-    news = []
+    articles = []
+
+    event_pool = set()
 
 
     for source, url in NEWS_FEEDS.items():
@@ -238,25 +464,34 @@ def get_news_data():
 
             for item in feed.entries[:20]:
 
+
                 title = getattr(
                     item,
                     "title",
                     ""
-                )
+                ).strip()
 
 
                 summary = getattr(
                     item,
                     "summary",
                     ""
-                )
+                ).strip()
 
 
                 link = getattr(
                     item,
                     "link",
                     ""
-                )
+                ).strip()
+
+
+                published = getattr(
+                    item,
+                    "published",
+                    ""
+                ).strip()
+
 
 
                 if not title or not link:
@@ -264,12 +499,8 @@ def get_news_data():
                     continue
 
 
-                if not is_recent(item):
 
-                    continue
-
-
-                if not is_market_related(
+                if not is_market_relevant(
                     title,
                     summary
                 ):
@@ -277,49 +508,75 @@ def get_news_data():
                     continue
 
 
-                old_titles = [
-                    clean_text(x["title"])
-                    for x in news
-                ]
+
+                event_id = generate_event_id(
+                    title
+                )
 
 
-                if duplicate(
-                    title,
-                    old_titles
-                ):
+                if event_id in event_pool:
 
                     continue
 
 
-                news.append({
+                event_pool.add(event_id)
+
+
+
+                article = {
 
                     "title": title,
 
+                    "summary": summary,
+
                     "source": source,
 
-                    "time":
-                    str(
-                        parse_time(item)
-                    ),
+                    "published": published,
 
                     "url": link,
 
-                })
+                    "category":
+                        classify_news(title)
+
+                }
+
+
+
+                article["score"] = calculate_score(
+                    article
+                )
+
+
+                articles.append(article)
+
 
 
         except Exception as e:
 
             print(
                 source,
-                "error:",
+                "获取失败:",
                 e
             )
 
 
-    # 按数量限制
-    return news[:10]
+
+    # 高分优先
+
+    articles.sort(
+        key=lambda x:
+        x["score"],
+        reverse=True
+    )
 
 
+    return articles[:MAX_NEWS]
+
+
+
+# =====================================
+# 测试
+# =====================================
 
 if __name__ == "__main__":
 
@@ -328,39 +585,41 @@ if __name__ == "__main__":
 
 
     print(
-        "\n========== 重大市场事件 ==========\n"
+        "\n========== TOP10重大市场事件 ==========\n"
     )
 
 
-    if not news:
+    for i, article in enumerate(
+        news,
+        1
+    ):
 
         print(
-            "过去36小时未发现影响市场的重要事件。"
+            f"{i}.【{article['category']}】"
         )
 
+        print(
+            article["title"]
+        )
 
-    else:
+        print(
+            "评分:",
+            article["score"]
+        )
 
+        print(
+            "来源:",
+            article["source"]
+        )
 
-        for i, item in enumerate(
-            news,
-            1
-        ):
+        print(
+            "时间:",
+            article["published"]
+        )
 
-            print(
-                f"{i}. {item['title']}"
-            )
+        print(
+            "链接:",
+            article["url"]
+        )
 
-            print(
-                f"来源：{item['source']}"
-            )
-
-            print(
-                f"时间：{item['time']}"
-            )
-
-            print(
-                f"原文：{item['url']}"
-            )
-
-            print()
+        print()
