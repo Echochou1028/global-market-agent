@@ -32,6 +32,6 @@ jobs:
           echo "src目录内容："
           ls -la src
 
-      - name: Test News Data
+      - name: Run Market Agent
         run: |
-          python src/news_data.py
+          python src/main.py
