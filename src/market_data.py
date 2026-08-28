@@ -26,18 +26,30 @@ def get_market_data():
                 results[name] = None
                 continue
 
+            # 最新交易日数据
             latest = data.iloc[-1]
 
+            high = float(latest["High"])
+            low = float(latest["Low"])
             close = float(latest["Close"])
 
+            # 昨日收盘价
             if len(data) >= 2:
-                previous = float(data.iloc[-2]["Close"])
-                change = (close - previous) / previous * 100
+                previous_close = float(data.iloc[-2]["Close"])
+                change = (
+                    (close - previous_close)
+                    / previous_close
+                    * 100
+                )
             else:
+                previous_close = close
                 change = 0
 
             results[name] = {
-                "price": close,
+                "high": high,
+                "low": low,
+                "close": close,
+                "previous_close": previous_close,
                 "change_percent": change,
             }
 
@@ -59,6 +71,9 @@ if __name__ == "__main__":
         else:
             print(
                 f"{name}: "
-                f"{data['price']:.2f} "
-                f"({data['change_percent']:+.2f}%)"
+                f"最高 {data['high']:.2f} | "
+                f"最低 {data['low']:.2f} | "
+                f"收盘 {data['close']:.2f} | "
+                f"昨收 {data['previous_close']:.2f} | "
+                f"涨跌幅 {data['change_percent']:+.2f}%"
             )
