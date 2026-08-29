@@ -58,7 +58,11 @@ def get_market_data():
                 progress=False,
                 threads=False,
             )
-
+            print(
+                f"{name} 原始数据日期："
+                f"{[str(x.date()) if hasattr(x, 'date') else str(x) for x in data.index]}"
+            )
+            
             # ==================================================
             # yfinance 某些版本返回 MultiIndex
             # ==================================================
