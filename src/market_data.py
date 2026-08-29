@@ -23,89 +23,156 @@ def get_market_data():
     results = {}
 
     for name, symbol in MARKETS.items():
+
         try:
-            data = yf.Ticker(symbol).history(period="5d")
+            # 多取几天，避免周末、节假日导致历史数据不足
+            data = yf.Ticker(symbol).history(
+                period="10d"
+            )
 
             if data.empty:
                 print(f"{name}：没有获取到数据")
                 results[name] = None
                 continue
 
-            # 删除 OHLC 全部缺失的行
+            # ==================================================
+            # 只保留 OHLC 完整的交易日
+            # ==================================================
+
+            required_columns = [
+                "Open",
+                "High",
+                "Low",
+                "Close",
+            ]
+
             data = data.dropna(
-                subset=["High", "Low", "Close"],
-                how="all"
+                subset=required_columns,
+                how="any"
             )
 
             if data.empty:
-                print(f"{name}：没有有效行情数据")
+                print(f"{name}：没有完整行情数据")
                 results[name] = None
                 continue
 
-            # 找到最近一条有效交易数据
+            # ==================================================
+            # 最近一个完整交易日
+            # ==================================================
+
             latest = data.iloc[-1]
 
-            high = latest["High"]
-            low = latest["Low"]
-            close = latest["Close"]
+            high = float(latest["High"])
+            low = float(latest["Low"])
+            close = float(latest["Close"])
 
-            # 检查核心字段是否有效
-            if (
-                pd.isna(high)
-                or pd.isna(low)
-                or pd.isna(close)
-            ):
-                print(f"{name}：最新行情数据缺失")
-                results[name] = None
-                continue
+            # ==================================================
+            # 上一个完整交易日
+            # ==================================================
 
-            # 找到上一条有效收盘价
-            valid_close = data["Close"].dropna()
+            if len(data) >= 2:
 
-            if len(valid_close) >= 2:
-                previous_close = float(valid_close.iloc[-2])
+                previous = data.iloc[-2]
+
+                previous_close = float(
+                    previous["Close"]
+                )
+
             else:
-                previous_close = float(close)
 
-            high = float(high)
-            low = float(low)
-            close = float(close)
+                previous_close = close
+
+            # ==================================================
+            # 计算涨跌幅
+            # ==================================================
 
             if previous_close != 0:
+
                 change = (
                     (close - previous_close)
                     / previous_close
                     * 100
                 )
+
             else:
+
                 change = 0.0
 
+            # ==================================================
+            # 获取数据日期
+            # ==================================================
+
+            latest_date = data.index[-1]
+
+            if hasattr(
+                latest_date,
+                "date"
+            ):
+
+                data_date = str(
+                    latest_date.date()
+                )
+
+            else:
+
+                data_date = str(
+                    latest_date
+                )
+
+            # ==================================================
+            # 保存结果
+            # ==================================================
+
             results[name] = {
+
+                "date": data_date,
+
                 "high": high,
+
                 "low": low,
+
                 "close": close,
-                "previous_close": previous_close,
-                "change_percent": change,
+
+                "previous_close":
+                    previous_close,
+
+                "change_percent":
+                    change,
+
             }
 
         except Exception as e:
-            print(f"{name} 获取失败: {e}")
+
+            print(
+                f"{name} 获取失败: {e}"
+            )
+
             results[name] = None
 
     return results
 
 
 if __name__ == "__main__":
+
     market_data = get_market_data()
 
-    print("\n========== 全球金融市场 ==========\n")
+    print(
+        "\n========== 全球金融市场 ==========\n"
+    )
 
     for name, data in market_data.items():
+
         if data is None:
-            print(f"{name}: 获取失败")
+
+            print(
+                f"{name}: 获取失败"
+            )
+
         else:
+
             print(
                 f"{name}: "
+                f"日期 {data['date']} | "
                 f"最高 {data['high']:.2f} | "
                 f"最低 {data['low']:.2f} | "
                 f"收盘 {data['close']:.2f} | "
