@@ -62,6 +62,8 @@ def get_market_data():
                 f"{name} 原始数据日期："
                 f"{[str(x.date()) if hasattr(x, 'date') else str(x) for x in data.index]}"
             )
+            print(f"{name} 最近两条原始数据：")
+            print(data[["Open", "High", "Low", "Close"]].tail(2))
             
             # ==================================================
             # yfinance 某些版本返回 MultiIndex
