@@ -13,9 +13,7 @@ print("=" * 90)
 ```
 print("\n正在获取全球金融市场数据...")
 
-# ============================================================
 # 获取市场数据
-# ============================================================
 market_data = get_market_data()
 
 # ============================================================
@@ -39,7 +37,6 @@ print("港股科技：数据待分析")
 # ============================================================
 print_header("二、全球市场总览 ⭐⭐⭐⭐⭐")
 
-# 表格列宽
 market_width = 12
 asset_width = 20
 number_width = 14
@@ -56,16 +53,18 @@ print(
     f"{'涨跌幅':^{change_width}}"
 )
 
-print("-" * (
-    market_width
-    + asset_width
-    + number_width * 4
-    + change_width
-))
+print(
+    "-"
+    * (
+        market_width
+        + asset_width
+        + number_width * 4
+        + change_width
+    )
+)
 
-# 市场数据
+# 输出市场数据
 for name, data in market_data.items():
-
     if data is None:
         print(
             f"{'全球市场':^{market_width}}"
@@ -76,7 +75,6 @@ for name, data in market_data.items():
             f"{'--':>{number_width}}"
             f"{'--':>{change_width}}"
         )
-
     else:
         high = data.get("high")
         low = data.get("low")
@@ -84,15 +82,25 @@ for name, data in market_data.items():
         previous_close = data.get("previous_close")
         change_percent = data.get("change_percent")
 
-        # 安全格式化
-        high_text = f"{high:,.2f}" if high is not None else "--"
-        low_text = f"{low:,.2f}" if low is not None else "--"
-        close_text = f"{close:,.2f}" if close is not None else "--"
-        previous_close_text = (
-            f"{previous_close:,.2f}"
-            if previous_close is not None
-            else "--"
-        )
+        if high is not None:
+            high_text = f"{high:,.2f}"
+        else:
+            high_text = "--"
+
+        if low is not None:
+            low_text = f"{low:,.2f}"
+        else:
+            low_text = "--"
+
+        if close is not None:
+            close_text = f"{close:,.2f}"
+        else:
+            close_text = "--"
+
+        if previous_close is not None:
+            previous_close_text = f"{previous_close:,.2f}"
+        else:
+            previous_close_text = "--"
 
         if change_percent is not None:
             change_text = f"{change_percent:+.2f}%"
@@ -198,7 +206,7 @@ print("🔥 A股：光模块 / PCB / 存储 / 国产算力 / AI应用")
 print("🔥 港股：腾讯 / 阿里 / 中芯国际 / 小米 / 恒生科技")
 
 # ============================================================
-# 完成
+# 报告完成
 # ============================================================
 print("\n" + "=" * 90)
 print("报告生成完成")
