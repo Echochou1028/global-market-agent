@@ -20,21 +20,73 @@ MARKETS = {
 }
 
 
+def download_data(symbol, start_date, end_date):
+    """
+    获取指定日期范围的日线数据
+    """
+
+    try:
+        data = yf.download(
+            symbol,
+            start=start_date.strftime("%Y-%m-%d"),
+            end=end_date.strftime("%Y-%m-%d"),
+            interval="1d",
+            auto_adjust=False,
+            progress=False,
+            threads=False,
+        )
+
+        if data.empty:
+            return None
+
+        # yfinance 某些版本返回 MultiIndex
+        if isinstance(data.columns, pd.MultiIndex):
+            data.columns = data.columns.get_level_values(0)
+
+        return data.sort_index()
+
+    except Exception as e:
+        print(f"数据获取异常：{e}")
+        return None
+
+
+def get_complete_rows(data):
+    """
+    只保留 Close 有效的完整交易数据。
+    High / Low / Close 必须存在。
+    """
+
+    if data is None or data.empty:
+        return pd.DataFrame()
+
+    required_columns = [
+        "High",
+        "Low",
+        "Close",
+    ]
+
+    for column in required_columns:
+        if column not in data.columns:
+            return pd.DataFrame()
+
+    result = data.dropna(
+        subset=required_columns,
+        how="any"
+    )
+
+    return result
+
+
 def get_market_data():
 
     results = {}
 
-    # ==========================================================
-    # 计算请求日期范围
-    #
-    # end 不包含当天，因此向后多请求几天，
-    # 防止周末、节假日造成数据缺失。
-    # ==========================================================
-
     today = datetime.now(timezone.utc).date()
 
+    # 多取几天，覆盖周末和节假日
     start_date = today - timedelta(days=10)
 
+    # end 不包含当天，所以多取一天
     end_date = today + timedelta(days=1)
 
     for name, symbol in MARKETS.items():
@@ -46,114 +98,152 @@ def get_market_data():
             )
 
             # ==================================================
-            # 获取明确日期范围的日线数据
+            # 第一次获取
             # ==================================================
 
-            data = yf.download(
+            data = download_data(
                 symbol,
-                start=start_date.strftime("%Y-%m-%d"),
-                end=end_date.strftime("%Y-%m-%d"),
-                interval="1d",
-                auto_adjust=False,
-                progress=False,
-                threads=False,
+                start_date,
+                end_date
             )
-            print(
-                f"{name} 原始数据日期："
-                f"{[str(x.date()) if hasattr(x, 'date') else str(x) for x in data.index]}"
-            )
-            print(f"{name} 最近两条原始数据：")
-            print(data[["Open", "High", "Low", "Close"]].tail(2))
-            
-            # ==================================================
-            # yfinance 某些版本返回 MultiIndex
-            # ==================================================
 
-            if isinstance(data.columns, pd.MultiIndex):
-
-                try:
-                    data.columns = data.columns.get_level_values(0)
-
-                except Exception:
-
-                    pass
-
-            if data.empty:
+            if data is None or data.empty:
 
                 print(
                     f"{name}：没有获取到数据"
                 )
 
                 results[name] = None
-
                 continue
 
             # ==================================================
-            # 确保索引按照时间排序
+            # 找到最近一条 Close 有效的数据
             # ==================================================
 
-            data = data.sort_index()
+            complete_data = get_complete_rows(data)
 
-            # ==================================================
-            # 只保留 OHLC 完整的数据
-            # ==================================================
-
-            required_columns = [
-                "Open",
-                "High",
-                "Low",
-                "Close",
-            ]
-
-            missing_columns = [
-                col
-                for col in required_columns
-                if col not in data.columns
-            ]
-
-            if missing_columns:
+            if complete_data.empty:
 
                 print(
-                    f"{name}：缺少字段 {missing_columns}"
+                    f"{name}：没有完整收盘数据"
                 )
 
                 results[name] = None
-
                 continue
 
-            data = data.dropna(
-                subset=required_columns,
-                how="any"
+            latest_date = complete_data.index[-1]
+
+            # ==================================================
+            # 判断原始数据最后一天是否存在
+            # ==================================================
+
+            raw_latest_date = data.index[-1]
+
+            if hasattr(raw_latest_date, "date"):
+                raw_latest_date = raw_latest_date.date()
+
+            if hasattr(latest_date, "date"):
+                latest_date = latest_date.date()
+
+            # ==================================================
+            # 如果最新日期 Close 缺失：
+            # 单独重新请求该日期
+            # ==================================================
+
+            if raw_latest_date > latest_date:
+
+                print(
+                    f"{name}："
+                    f"{raw_latest_date} 收盘数据缺失，"
+                    f"正在重新获取..."
+                )
+
+                retry_start = raw_latest_date
+                retry_end = raw_latest_date + timedelta(days=1)
+
+                retry_data = download_data(
+                    symbol,
+                    retry_start,
+                    retry_end
+                )
+
+                retry_complete = get_complete_rows(
+                    retry_data
+                )
+
+                if not retry_complete.empty:
+
+                    # 找到重新获取后的最新完整数据
+                    retry_latest_date = (
+                        retry_complete.index[-1]
+                    )
+
+                    if hasattr(
+                        retry_latest_date,
+                        "date"
+                    ):
+                        retry_latest_date = (
+                            retry_latest_date.date()
+                        )
+
+                    # 如果确实获取到了更新日期
+                    if retry_latest_date >= latest_date:
+
+                        complete_data = pd.concat(
+                            [
+                                complete_data,
+                                retry_complete
+                            ]
+                        )
+
+                        complete_data = (
+                            complete_data[
+                                ~complete_data.index.duplicated(
+                                    keep="last"
+                                )
+                            ]
+                            .sort_index()
+                        )
+
+                        latest_date = (
+                            retry_latest_date
+                        )
+
+                        print(
+                            f"{name}："
+                            f"{latest_date} "
+                            f"收盘数据获取成功"
+                        )
+
+                else:
+
+                    print(
+                        f"{name}："
+                        f"{raw_latest_date} "
+                        f"重新获取仍失败，"
+                        f"回退到最近完整交易日 "
+                        f"{latest_date}"
+                    )
+
+            # ==================================================
+            # 最终确定最新完整交易日
+            # ==================================================
+
+            latest = complete_data.iloc[-1]
+
+            # ==================================================
+            # 找上一交易日收盘价
+            # ==================================================
+
+            valid_close = (
+                complete_data["Close"]
+                .dropna()
             )
 
-            if data.empty:
-
-                print(
-                    f"{name}：没有完整行情数据"
-                )
-
-                results[name] = None
-
-                continue
-
-            # ==================================================
-            # 最近一个完整交易日
-            # ==================================================
-
-            latest = data.iloc[-1]
-
-            latest_date = data.index[-1]
-
-            # ==================================================
-            # 上一个完整交易日
-            # ==================================================
-
-            if len(data) >= 2:
-
-                previous = data.iloc[-2]
+            if len(valid_close) >= 2:
 
                 previous_close = float(
-                    previous["Close"]
+                    valid_close.iloc[-2]
                 )
 
             else:
@@ -163,7 +253,7 @@ def get_market_data():
                 )
 
             # ==================================================
-            # 当前交易日数据
+            # 获取 OHLC
             # ==================================================
 
             high = float(
@@ -195,20 +285,7 @@ def get_market_data():
                 change_percent = 0.0
 
             # ==================================================
-            # 处理日期
-            # ==================================================
-
-            if hasattr(
-                latest_date,
-                "date"
-            ):
-
-                latest_date = (
-                    latest_date.date()
-                )
-
-            # ==================================================
-            # 保存结果
+            # 保存最终结果
             # ==================================================
 
             results[name] = {
@@ -242,7 +319,7 @@ def get_market_data():
         except Exception as e:
 
             print(
-                f"{name} 获取失败: {e}"
+                f"{name} 获取失败：{e}"
             )
 
             results[name] = None
