@@ -25,9 +25,11 @@ def get_market_data():
     for name, symbol in MARKETS.items():
 
         try:
-            # 多取几天，避免周末、节假日导致历史数据不足
+            # 获取最近10个交易日数据
             data = yf.Ticker(symbol).history(
-                period="10d"
+                period="10d",
+                interval="1d",
+                auto_adjust=False
             )
 
             if data.empty:
@@ -43,7 +45,7 @@ def get_market_data():
                 "Open",
                 "High",
                 "Low",
-                "Close",
+                "Close"
             ]
 
             data = data.dropna(
@@ -57,10 +59,18 @@ def get_market_data():
                 continue
 
             # ==================================================
+            # 按日期排序
+            # ==================================================
+
+            data = data.sort_index()
+
+            # ==================================================
             # 最近一个完整交易日
             # ==================================================
 
             latest = data.iloc[-1]
+
+            latest_date = data.index[-1]
 
             high = float(latest["High"])
             low = float(latest["Low"])
@@ -99,15 +109,10 @@ def get_market_data():
                 change = 0.0
 
             # ==================================================
-            # 获取数据日期
+            # 转换数据日期
             # ==================================================
 
-            latest_date = data.index[-1]
-
-            if hasattr(
-                latest_date,
-                "date"
-            ):
+            if hasattr(latest_date, "date"):
 
                 data_date = str(
                     latest_date.date()
@@ -138,7 +143,6 @@ def get_market_data():
 
                 "change_percent":
                     change,
-
             }
 
         except Exception as e:
