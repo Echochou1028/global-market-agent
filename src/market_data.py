@@ -1,4 +1,5 @@
 import yfinance as yf
+import pandas as pd
 
 
 MARKETS = {
@@ -20,30 +21,61 @@ def get_market_data():
 
     for name, symbol in MARKETS.items():
         try:
-            data = yf.Ticker(symbol).history(period="2d")
+            data = yf.Ticker(symbol).history(period="5d")
 
             if data.empty:
+                print(f"{name}：没有获取到数据")
                 results[name] = None
                 continue
 
-            # 最新交易日数据
+            # 删除 OHLC 全部缺失的行
+            data = data.dropna(
+                subset=["High", "Low", "Close"],
+                how="all"
+            )
+
+            if data.empty:
+                print(f"{name}：没有有效行情数据")
+                results[name] = None
+                continue
+
+            # 找到最近一条有效交易数据
             latest = data.iloc[-1]
 
-            high = float(latest["High"])
-            low = float(latest["Low"])
-            close = float(latest["Close"])
+            high = latest["High"]
+            low = latest["Low"]
+            close = latest["Close"]
 
-            # 昨日收盘价
-            if len(data) >= 2:
-                previous_close = float(data.iloc[-2]["Close"])
+            # 检查核心字段是否有效
+            if (
+                pd.isna(high)
+                or pd.isna(low)
+                or pd.isna(close)
+            ):
+                print(f"{name}：最新行情数据缺失")
+                results[name] = None
+                continue
+
+            # 找到上一条有效收盘价
+            valid_close = data["Close"].dropna()
+
+            if len(valid_close) >= 2:
+                previous_close = float(valid_close.iloc[-2])
+            else:
+                previous_close = float(close)
+
+            high = float(high)
+            low = float(low)
+            close = float(close)
+
+            if previous_close != 0:
                 change = (
                     (close - previous_close)
                     / previous_close
                     * 100
                 )
             else:
-                previous_close = close
-                change = 0
+                change = 0.0
 
             results[name] = {
                 "high": high,
