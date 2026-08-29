@@ -1,5 +1,6 @@
 import yfinance as yf
 import pandas as pd
+from datetime import datetime, timedelta, timezone
 
 
 MARKETS = {
@@ -20,33 +21,99 @@ MARKETS = {
 
 
 def get_market_data():
+
     results = {}
+
+    # ==========================================================
+    # 计算请求日期范围
+    #
+    # end 不包含当天，因此向后多请求几天，
+    # 防止周末、节假日造成数据缺失。
+    # ==========================================================
+
+    today = datetime.now(timezone.utc).date()
+
+    start_date = today - timedelta(days=10)
+
+    end_date = today + timedelta(days=1)
 
     for name, symbol in MARKETS.items():
 
         try:
-            # 获取最近10个交易日数据
-            data = yf.Ticker(symbol).history(
-                period="10d",
-                interval="1d",
-                auto_adjust=False
+
+            print(
+                f"正在获取 {name} ({symbol})..."
             )
 
+            # ==================================================
+            # 获取明确日期范围的日线数据
+            # ==================================================
+
+            data = yf.download(
+                symbol,
+                start=start_date.strftime("%Y-%m-%d"),
+                end=end_date.strftime("%Y-%m-%d"),
+                interval="1d",
+                auto_adjust=False,
+                progress=False,
+                threads=False,
+            )
+
+            # ==================================================
+            # yfinance 某些版本返回 MultiIndex
+            # ==================================================
+
+            if isinstance(data.columns, pd.MultiIndex):
+
+                try:
+                    data.columns = data.columns.get_level_values(0)
+
+                except Exception:
+
+                    pass
+
             if data.empty:
-                print(f"{name}：没有获取到数据")
+
+                print(
+                    f"{name}：没有获取到数据"
+                )
+
                 results[name] = None
+
                 continue
 
             # ==================================================
-            # 只保留 OHLC 完整的交易日
+            # 确保索引按照时间排序
+            # ==================================================
+
+            data = data.sort_index()
+
+            # ==================================================
+            # 只保留 OHLC 完整的数据
             # ==================================================
 
             required_columns = [
                 "Open",
                 "High",
                 "Low",
-                "Close"
+                "Close",
             ]
+
+            missing_columns = [
+                col
+                for col in required_columns
+                if col not in data.columns
+            ]
+
+            if missing_columns:
+
+                print(
+                    f"{name}：缺少字段 {missing_columns}"
+                )
+
+                results[name] = None
+
+                continue
 
             data = data.dropna(
                 subset=required_columns,
@@ -54,15 +121,14 @@ def get_market_data():
             )
 
             if data.empty:
-                print(f"{name}：没有完整行情数据")
+
+                print(
+                    f"{name}：没有完整行情数据"
+                )
+
                 results[name] = None
+
                 continue
-
-            # ==================================================
-            # 按日期排序
-            # ==================================================
-
-            data = data.sort_index()
 
             # ==================================================
             # 最近一个完整交易日
@@ -71,10 +137,6 @@ def get_market_data():
             latest = data.iloc[-1]
 
             latest_date = data.index[-1]
-
-            high = float(latest["High"])
-            low = float(latest["Low"])
-            close = float(latest["Close"])
 
             # ==================================================
             # 上一个完整交易日
@@ -90,7 +152,25 @@ def get_market_data():
 
             else:
 
-                previous_close = close
+                previous_close = float(
+                    latest["Close"]
+                )
+
+            # ==================================================
+            # 当前交易日数据
+            # ==================================================
+
+            high = float(
+                latest["High"]
+            )
+
+            low = float(
+                latest["Low"]
+            )
+
+            close = float(
+                latest["Close"]
+            )
 
             # ==================================================
             # 计算涨跌幅
@@ -98,7 +178,7 @@ def get_market_data():
 
             if previous_close != 0:
 
-                change = (
+                change_percent = (
                     (close - previous_close)
                     / previous_close
                     * 100
@@ -106,22 +186,19 @@ def get_market_data():
 
             else:
 
-                change = 0.0
+                change_percent = 0.0
 
             # ==================================================
-            # 转换数据日期
+            # 处理日期
             # ==================================================
 
-            if hasattr(latest_date, "date"):
+            if hasattr(
+                latest_date,
+                "date"
+            ):
 
-                data_date = str(
+                latest_date = (
                     latest_date.date()
-                )
-
-            else:
-
-                data_date = str(
-                    latest_date
                 )
 
             # ==================================================
@@ -130,20 +207,31 @@ def get_market_data():
 
             results[name] = {
 
-                "date": data_date,
+                "date":
+                    str(latest_date),
 
-                "high": high,
+                "high":
+                    high,
 
-                "low": low,
+                "low":
+                    low,
 
-                "close": close,
+                "close":
+                    close,
 
                 "previous_close":
                     previous_close,
 
                 "change_percent":
-                    change,
+                    change_percent,
             }
+
+            print(
+                f"{name}："
+                f"{latest_date} "
+                f"收盘 {close:.2f} "
+                f"涨跌 {change_percent:+.2f}%"
+            )
 
         except Exception as e:
 
