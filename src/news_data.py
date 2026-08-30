@@ -1066,31 +1066,48 @@ def calculate_score(
         )
     )
 
-    text = (
-        f"{title} {summary}"
-    )
+    text = f"{title} {summary}"
 
     score = 0
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # 1. 市场影响范围：0-30
-    # --------------------------------------------------------
+    # ========================================================
 
     scope_keywords = [
 
+        # 央行 / 宏观
         "fed",
         "fomc",
+        "federal reserve",
         "central bank",
         "interest rate",
+        "rate cut",
+        "rate hike",
         "inflation",
+        "cpi",
         "gdp",
+
+        # 贸易 / 地缘
         "tariff",
         "trade war",
-        "war",
         "sanctions",
+        "war",
+        "military attack",
+
+        # 能源
         "opec",
+        "oil",
+        "crude",
+        "brent",
+
+        # 金融市场
         "global market",
+        "stock market",
+        "market crash",
+        "market selloff",
+        "selloff",
 
     ]
 
@@ -1100,57 +1117,134 @@ def calculate_score(
         if word in text
     )
 
-    if scope_hits >= 3:
-
+    if scope_hits >= 4:
         score += 30
 
-    elif scope_hits == 2:
+    elif scope_hits == 3:
+        score += 27
 
-        score += 24
+    elif scope_hits == 2:
+        score += 23
 
     elif scope_hits == 1:
-
-        score += 17
-
-    else:
-
-        score += 8
-
-
-    # --------------------------------------------------------
-    # 2. 市场影响程度：0-25
-    # --------------------------------------------------------
-
-    impact_hits = sum(
-        1
-        for word in HIGH_IMPACT_KEYWORDS
-        if word in text
-    )
-
-    if impact_hits >= 4:
-
-        score += 25
-
-    elif impact_hits >= 3:
-
-        score += 22
-
-    elif impact_hits >= 2:
-
-        score += 18
-
-    elif impact_hits >= 1:
-
-        score += 12
+        score += 16
 
     else:
-
         score += 5
 
 
-    # --------------------------------------------------------
-    # 3. 来源可信度：0-10
-    # --------------------------------------------------------
+    # ========================================================
+    # 2. 直接市场冲击：0-30
+    # ========================================================
+
+    direct_impact_keywords = [
+
+        "rate hike",
+        "rate cut",
+        "interest rate",
+
+        "inflation",
+        "cpi",
+        "payroll",
+        "gdp",
+
+        "market crash",
+        "selloff",
+        "sell-off",
+        "surge",
+        "plunge",
+
+        "record high",
+        "record low",
+
+        "earnings",
+        "quarterly results",
+        "guidance",
+
+        "acquisition",
+        "merger",
+        "takeover",
+        "bankruptcy",
+
+        "oil",
+        "crude",
+        "brent",
+        "opec",
+
+        "sanctions",
+        "tariff",
+        "trade war",
+
+        "export controls",
+
+    ]
+
+    impact_hits = sum(
+        1
+        for word in direct_impact_keywords
+        if word in text
+    )
+
+    if impact_hits >= 5:
+        score += 30
+
+    elif impact_hits >= 4:
+        score += 27
+
+    elif impact_hits >= 3:
+        score += 23
+
+    elif impact_hits >= 2:
+        score += 18
+
+    elif impact_hits == 1:
+        score += 12
+
+    else:
+        score += 5
+
+
+    # ========================================================
+    # 3. 龙头公司 / 核心资产：0-15
+    # ========================================================
+
+    major_assets = [
+
+        "nvidia",
+        "apple",
+        "microsoft",
+        "amazon",
+        "alphabet",
+        "google",
+        "meta",
+        "tesla",
+        "broadcom",
+        "amd",
+        "intel",
+        "tsmc",
+        "asml",
+
+    ]
+
+    asset_hits = sum(
+        1
+        for word in major_assets
+        if word in text
+    )
+
+    if asset_hits >= 3:
+        score += 15
+
+    elif asset_hits == 2:
+        score += 12
+
+    elif asset_hits == 1:
+        score += 8
+
+
+    # ========================================================
+    # 4. 来源可信度：0-10
+    # ========================================================
 
     score += SOURCE_PRIORITY.get(
         article["source"],
@@ -1158,38 +1252,51 @@ def calculate_score(
     )
 
 
-    # --------------------------------------------------------
-    # 4. 新闻类型
-    # --------------------------------------------------------
+    # ========================================================
+    # 5. 重大事件类型：0-10
+    # ========================================================
+
+    event_keywords = [
+
+        "earnings",
+        "results",
+        "guidance",
+
+        "rate",
+        "fed",
+        "fomc",
+
+        "tariff",
+        "sanctions",
+
+        "oil",
+        "crude",
+        "brent",
+
+        "war",
+        "military",
+
+        "acquisition",
+        "merger",
+        "bankruptcy",
+
+    ]
 
     if any(
         word in title
-        for word in [
-            "earnings",
-            "results",
-            "guidance",
-            "rate",
-            "fed",
-            "fomc",
-            "tariff",
-            "sanctions",
-            "oil",
-            "crude",
-            "gold",
-            "war",
-        ]
+        for word in event_keywords
     ):
 
         score += 10
 
     else:
 
-        score += 5
+        score += 4
 
 
-    # --------------------------------------------------------
-    # 5. Opinion / Analysis 降权
-    # --------------------------------------------------------
+    # ========================================================
+    # 6. Opinion / Analysis 大幅降权
+    # ========================================================
 
     opinion_words = [
 
@@ -1206,12 +1313,35 @@ def calculate_score(
         for word in opinion_words
     ):
 
+        score -= 20
+
+
+    # ========================================================
+    # 7. 低市场价值人物 / 故事类新闻降权
+    # ========================================================
+
+    low_value_patterns = [
+
+        "birthday",
+        "remains active",
+        "what we learned",
+        "who's next",
+        "social media fears",
+        "landmark settlement",
+
+    ]
+
+    if any(
+        word in title
+        for word in low_value_patterns
+    ):
+
         score -= 15
 
 
-    # --------------------------------------------------------
-    # 6. 时效性
-    # --------------------------------------------------------
+    # ========================================================
+    # 8. 时效性：0-20
+    # ========================================================
 
     published_at = article.get(
         "published_at"
@@ -1247,6 +1377,10 @@ def calculate_score(
 
             score += 2
 
+
+    # ========================================================
+    # 最终限制：0-100
+    # ========================================================
 
     return max(
         0,
