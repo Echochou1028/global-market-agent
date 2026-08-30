@@ -1174,9 +1174,7 @@ def calculate_score(
 
     scope_keywords = [
 
-        # ------------------------------
         # 宏观 / 央行
-        # ------------------------------
         "fed",
         "federal reserve",
         "fomc",
@@ -1191,9 +1189,7 @@ def calculate_score(
         "unemployment",
         "gdp",
 
-        # ------------------------------
         # 贸易 / 地缘政治
-        # ------------------------------
         "tariff",
         "trade war",
         "sanctions",
@@ -1202,9 +1198,7 @@ def calculate_score(
         "geopolitical",
         "export controls",
 
-        # ------------------------------
         # 能源 / 大宗商品
-        # ------------------------------
         "opec",
         "oil",
         "crude",
@@ -1214,9 +1208,7 @@ def calculate_score(
         "commodity",
         "commodities",
 
-        # ------------------------------
         # 全球金融市场
-        # ------------------------------
         "global market",
         "stock market",
         "stocks",
@@ -1265,9 +1257,7 @@ def calculate_score(
 
     direct_impact_keywords = [
 
-        # ------------------------------
         # 政策 / 宏观
-        # ------------------------------
         "rate hike",
         "rate cut",
         "interest rate",
@@ -1278,9 +1268,7 @@ def calculate_score(
         "unemployment",
         "gdp",
 
-        # ------------------------------
         # 市场剧烈波动
-        # ------------------------------
         "market crash",
         "market selloff",
         "selloff",
@@ -1294,9 +1282,7 @@ def calculate_score(
         "record high",
         "record low",
 
-        # ------------------------------
         # 公司重大事件
-        # ------------------------------
         "earnings",
         "quarterly results",
         "revenue",
@@ -1311,18 +1297,14 @@ def calculate_score(
         "layoffs",
         "ipo",
 
-        # ------------------------------
         # 能源
-        # ------------------------------
         "oil",
         "crude",
         "brent",
         "wti",
         "opec",
 
-        # ------------------------------
         # 地缘 / 政策
-        # ------------------------------
         "sanctions",
         "tariff",
         "trade war",
@@ -1415,50 +1397,50 @@ def calculate_score(
 
     event_keywords = [
 
-    # 宏观 / 央行
-    "rate hike",
-    "rate cut",
-    "interest rate",
-    "fed",
-    "fomc",
-    "inflation",
-    "cpi",
-    "payroll",
-    "gdp",
+        # 宏观 / 央行
+        "rate hike",
+        "rate cut",
+        "interest rate",
+        "fed",
+        "fomc",
+        "inflation",
+        "cpi",
+        "payroll",
+        "gdp",
 
-    # 地缘 / 贸易
-    "tariff",
-    "sanctions",
-    "trade war",
-    "military attack",
-    "war",
+        # 地缘 / 贸易
+        "tariff",
+        "sanctions",
+        "trade war",
+        "military attack",
+        "war",
 
-    # 能源
-    "opec",
-    "oil",
-    "crude",
-    "brent",
+        # 能源
+        "opec",
+        "oil",
+        "crude",
+        "brent",
 
-    # 公司重大事件
-    "earnings",
-    "quarterly results",
-    "acquisition",
-    "merger",
-    "takeover",
-    "bankruptcy",
+        # 公司重大事件
+        "earnings",
+        "quarterly results",
+        "acquisition",
+        "merger",
+        "takeover",
+        "bankruptcy",
 
-]
+    ]
 
-if any(
-    word in title
-    for word in event_keywords
-):
+    if any(
+        word in title
+        for word in event_keywords
+    ):
 
-    score += 10
+        score += 10
 
-else:
+    else:
 
-    score += 4
+        score += 4
 
 
     # ========================================================
@@ -1467,20 +1449,20 @@ else:
 
     opinion_words = [
 
-    "op-ed",
-    "opinion",
-    "commentary",
-    "editorial",
-    "analysis",
+        "op-ed",
+        "opinion",
+        "commentary",
+        "editorial",
+        "analysis",
 
-    "why",
-    "how",
-    "what we learned",
-    "the big lesson",
-    "playbook",
-    "who's next",
+        "why",
+        "how",
+        "what we learned",
+        "the big lesson",
+        "playbook",
+        "who's next",
 
-]
+    ]
 
     if any(
         word in title
@@ -1491,34 +1473,34 @@ else:
 
 
     # ========================================================
-    # 7. 低市场价值 / 人物故事类降权
+    # 7. 低市场价值 / 人物故事 / 投资推荐降权
     # ========================================================
 
     low_value_patterns = [
 
-    # 人物 / 故事
-    "birthday",
-    "remains active",
-    "what we learned",
-    "who's next",
+        # 人物 / 故事
+        "birthday",
+        "remains active",
+        "what we learned",
+        "who's next",
 
-    # 社会 / 故事型
-    "social media fears",
-    "landmark settlement",
+        # 社会 / 故事型
+        "social media fears",
+        "landmark settlement",
 
-    # 投资推荐
-    "top stocks",
-    "best stocks",
-    "dividend stocks",
-    "stocks to buy",
-    "stocks to watch",
-    "analysts suggest",
-    "stock picks",
-    "investment ideas",
-    "for consistent income",
-    "how to invest",
+        # 投资推荐
+        "top stocks",
+        "best stocks",
+        "dividend stocks",
+        "stocks to buy",
+        "stocks to watch",
+        "analysts suggest",
+        "stock picks",
+        "investment ideas",
+        "for consistent income",
+        "how to invest",
 
-]
+    ]
 
     if any(
         word in title
