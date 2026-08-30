@@ -516,6 +516,37 @@ def clean_text(text):
 
 
 # ============================================================
+# 关键词匹配
+# ============================================================
+
+def keyword_match(
+    text,
+    keyword
+):
+
+    text = clean_text(text)
+
+    keyword = clean_text(keyword)
+
+    if not text or not keyword:
+
+        return False
+
+    # 多词关键词
+    if " " in keyword:
+
+        return keyword in text
+
+    # 单词关键词使用完整单词匹配
+    pattern = rf"\b{re.escape(keyword)}\b"
+
+    return re.search(
+        pattern,
+        text
+    ) is not None
+
+
+# ============================================================
 # 发布时间解析
 # ============================================================
 
@@ -623,7 +654,10 @@ def is_market_relevant(
     )
 
     return any(
-        keyword in text
+        keyword_match(
+            text,
+            keyword
+        )
         for keyword in MARKET_KEYWORDS
     )
 
@@ -642,7 +676,10 @@ def is_excluded(
     )
 
     return any(
-        keyword in text
+        keyword_match(
+            text,
+            keyword
+        )
         for keyword in EXCLUDE_KEYWORDS
     )
 
