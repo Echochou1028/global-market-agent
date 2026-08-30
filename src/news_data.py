@@ -492,8 +492,24 @@ EXCLUDE_KEYWORDS = [
     "restaurant",
     "lifestyle",
 
-]
+    # --------------------------------------------------------
+    # 美国政治 / 司法等非金融市场事件
+    # --------------------------------------------------------
 
+    "hush money",
+    "court",
+    "court case",
+    "lawsuit",
+    "legal battle",
+    "conviction",
+    "trial",
+    "judge",
+    "sentenced",
+    "indicted",
+    "indictment",
+    "criminal case",
+
+]
 
 # ============================================================
 # 文本清洗
