@@ -1415,45 +1415,50 @@ def calculate_score(
 
     event_keywords = [
 
-        "earnings",
-        "quarterly results",
-        "guidance",
-        "acquisition",
-        "merger",
-        "takeover",
-        "bankruptcy",
+    # 宏观 / 央行
+    "rate hike",
+    "rate cut",
+    "interest rate",
+    "fed",
+    "fomc",
+    "inflation",
+    "cpi",
+    "payroll",
+    "gdp",
 
-        "rate",
-        "fed",
-        "fomc",
-        "central bank",
+    # 地缘 / 贸易
+    "tariff",
+    "sanctions",
+    "trade war",
+    "military attack",
+    "war",
 
-        "tariff",
-        "sanctions",
-        "export controls",
+    # 能源
+    "opec",
+    "oil",
+    "crude",
+    "brent",
 
-        "oil",
-        "crude",
-        "brent",
-        "opec",
+    # 公司重大事件
+    "earnings",
+    "quarterly results",
+    "acquisition",
+    "merger",
+    "takeover",
+    "bankruptcy",
 
-        "war",
-        "military",
-        "missile",
-        "ceasefire",
+]
 
-    ]
+if any(
+    word in title
+    for word in event_keywords
+):
 
-    if any(
-        word in title
-        for word in event_keywords
-    ):
+    score += 10
 
-        score += 10
+else:
 
-    else:
-
-        score += 4
+    score += 4
 
 
     # ========================================================
@@ -1462,16 +1467,20 @@ def calculate_score(
 
     opinion_words = [
 
-        "op-ed",
-        "opinion",
-        "commentary",
-        "editorial",
-        "analysis",
-        "analyst",
-        "what we learned",
-        "what investors should know",
+    "op-ed",
+    "opinion",
+    "commentary",
+    "editorial",
+    "analysis",
 
-    ]
+    "why",
+    "how",
+    "what we learned",
+    "the big lesson",
+    "playbook",
+    "who's next",
+
+]
 
     if any(
         word in title
@@ -1487,16 +1496,29 @@ def calculate_score(
 
     low_value_patterns = [
 
-        "birthday",
-        "remains active",
-        "what we learned",
-        "who's next",
-        "social media fears",
-        "what investors should know",
-        "life story",
-        "personal story",
+    # 人物 / 故事
+    "birthday",
+    "remains active",
+    "what we learned",
+    "who's next",
 
-    ]
+    # 社会 / 故事型
+    "social media fears",
+    "landmark settlement",
+
+    # 投资推荐
+    "top stocks",
+    "best stocks",
+    "dividend stocks",
+    "stocks to buy",
+    "stocks to watch",
+    "analysts suggest",
+    "stock picks",
+    "investment ideas",
+    "for consistent income",
+    "how to invest",
+
+]
 
     if any(
         word in title
