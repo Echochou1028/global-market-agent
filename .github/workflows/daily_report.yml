@@ -35,3 +35,6 @@ jobs:
       - name: Run Market Agent
         run: |
           python src/market_data.py
+      - name: Run news data
+        run: |
+          python src/news_data.py
