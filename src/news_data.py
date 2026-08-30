@@ -699,7 +699,7 @@ def classify_news(
 
 
     # ========================================================
-    # 第一优先级：宏观经济与央行政策
+    # 1. 宏观经济与央行政策
     # ========================================================
 
     macro_keywords = [
@@ -713,6 +713,8 @@ def classify_news(
         "inflation",
         "cpi",
         "ppi",
+        "jobs",
+        "employment",
         "payroll",
         "unemployment",
         "gdp",
@@ -723,7 +725,10 @@ def classify_news(
     ]
 
     if any(
-        keyword in text
+        keyword_match(
+            text,
+            keyword
+        )
         for keyword in macro_keywords
     ):
 
@@ -731,7 +736,7 @@ def classify_news(
 
 
     # ========================================================
-    # 第二优先级：地缘政治与制裁
+    # 2. 地缘政治与制裁
     # ========================================================
 
     geopolitical_keywords = [
@@ -748,6 +753,7 @@ def classify_news(
         "tariff",
         "trade war",
         "export controls",
+
         "iran",
         "israel",
         "russia",
@@ -758,7 +764,10 @@ def classify_news(
     ]
 
     if any(
-        keyword in text
+        keyword_match(
+            text,
+            keyword
+        )
         for keyword in geopolitical_keywords
     ):
 
@@ -766,7 +775,7 @@ def classify_news(
 
 
     # ========================================================
-    # 第三优先级：能源与大宗商品
+    # 3. 能源与大宗商品
     # ========================================================
 
     commodity_keywords = [
@@ -786,7 +795,10 @@ def classify_news(
     ]
 
     if any(
-        keyword in text
+        keyword_match(
+            text,
+            keyword
+        )
         for keyword in commodity_keywords
     ):
 
@@ -794,7 +806,7 @@ def classify_news(
 
 
     # ========================================================
-    # 第四优先级：AI与半导体
+    # 4. AI与半导体
     # ========================================================
 
     ai_keywords = [
@@ -822,7 +834,10 @@ def classify_news(
     ]
 
     if any(
-        keyword in text
+        keyword_match(
+            text,
+            keyword
+        )
         for keyword in ai_keywords
     ):
 
@@ -830,7 +845,7 @@ def classify_news(
 
 
     # ========================================================
-    # 第五优先级：公司重大事件
+    # 5. 公司重大事件
     # ========================================================
 
     company_keywords = [
@@ -868,7 +883,10 @@ def classify_news(
     ]
 
     if any(
-        keyword in text
+        keyword_match(
+            text,
+            keyword
+        )
         for keyword in company_keywords
     ):
 
@@ -876,7 +894,7 @@ def classify_news(
 
 
     # ========================================================
-    # 第六优先级：全球金融市场
+    # 6. 全球金融市场
     # ========================================================
 
     market_keywords = [
@@ -909,7 +927,10 @@ def classify_news(
     ]
 
     if any(
-        keyword in text
+        keyword_match(
+            text,
+            keyword
+        )
         for keyword in market_keywords
     ):
 
@@ -917,7 +938,6 @@ def classify_news(
 
 
     return "全球金融市场"
-
 
 # ============================================================
 # 标题去重
