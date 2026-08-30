@@ -1174,37 +1174,63 @@ def calculate_score(
 
     scope_keywords = [
 
-        # 央行 / 宏观
+        # ------------------------------
+        # 宏观 / 央行
+        # ------------------------------
         "fed",
-        "fomc",
         "federal reserve",
+        "fomc",
         "central bank",
         "interest rate",
         "rate cut",
         "rate hike",
         "inflation",
         "cpi",
+        "ppi",
+        "payroll",
+        "unemployment",
         "gdp",
 
-        # 贸易 / 地缘
+        # ------------------------------
+        # 贸易 / 地缘政治
+        # ------------------------------
         "tariff",
         "trade war",
         "sanctions",
         "war",
-        "military attack",
+        "military",
+        "geopolitical",
+        "export controls",
 
-        # 能源
+        # ------------------------------
+        # 能源 / 大宗商品
+        # ------------------------------
         "opec",
         "oil",
         "crude",
         "brent",
+        "wti",
+        "gold",
+        "commodity",
+        "commodities",
 
-        # 金融市场
+        # ------------------------------
+        # 全球金融市场
+        # ------------------------------
         "global market",
         "stock market",
+        "stocks",
+        "equities",
         "market crash",
         "market selloff",
         "selloff",
+        "sell-off",
+        "bond",
+        "treasury",
+        "yield",
+        "dollar",
+        "yen",
+        "forex",
 
     ]
 
@@ -1214,65 +1240,96 @@ def calculate_score(
         if word in text
     )
 
-    if scope_hits >= 4:
+    if scope_hits >= 5:
         score += 30
 
+    elif scope_hits == 4:
+        score += 28
+
     elif scope_hits == 3:
-        score += 27
+        score += 25
 
     elif scope_hits == 2:
-        score += 23
+        score += 20
 
     elif scope_hits == 1:
-        score += 16
+        score += 13
 
     else:
         score += 5
 
 
     # ========================================================
-    # 2. 直接市场冲击：0-30
+    # 2. 直接市场冲击：0-25
     # ========================================================
 
     direct_impact_keywords = [
 
+        # ------------------------------
+        # 政策 / 宏观
+        # ------------------------------
         "rate hike",
         "rate cut",
         "interest rate",
-
         "inflation",
         "cpi",
+        "ppi",
         "payroll",
+        "unemployment",
         "gdp",
 
+        # ------------------------------
+        # 市场剧烈波动
+        # ------------------------------
         "market crash",
+        "market selloff",
         "selloff",
         "sell-off",
         "surge",
         "plunge",
-
+        "soar",
+        "slump",
+        "tumble",
+        "rally",
         "record high",
         "record low",
 
+        # ------------------------------
+        # 公司重大事件
+        # ------------------------------
         "earnings",
         "quarterly results",
+        "revenue",
+        "profit",
         "guidance",
-
+        "forecast",
+        "outlook",
         "acquisition",
         "merger",
         "takeover",
         "bankruptcy",
+        "layoffs",
+        "ipo",
 
+        # ------------------------------
+        # 能源
+        # ------------------------------
         "oil",
         "crude",
         "brent",
+        "wti",
         "opec",
 
+        # ------------------------------
+        # 地缘 / 政策
+        # ------------------------------
         "sanctions",
         "tariff",
         "trade war",
-
         "export controls",
+        "military attack",
+        "missile",
+        "ceasefire",
 
     ]
 
@@ -1283,22 +1340,22 @@ def calculate_score(
     )
 
     if impact_hits >= 5:
-        score += 30
+        score += 25
 
-    elif impact_hits >= 4:
-        score += 27
-
-    elif impact_hits >= 3:
+    elif impact_hits == 4:
         score += 23
 
-    elif impact_hits >= 2:
-        score += 18
+    elif impact_hits == 3:
+        score += 20
+
+    elif impact_hits == 2:
+        score += 16
 
     elif impact_hits == 1:
-        score += 12
+        score += 10
 
     else:
-        score += 5
+        score += 4
 
 
     # ========================================================
@@ -1320,6 +1377,9 @@ def calculate_score(
         "intel",
         "tsmc",
         "asml",
+        "salesforce",
+        "crowdstrike",
+        "berkshire",
 
     ]
 
@@ -1333,10 +1393,10 @@ def calculate_score(
         score += 15
 
     elif asset_hits == 2:
-        score += 12
+        score += 11
 
     elif asset_hits == 1:
-        score += 8
+        score += 7
 
 
     # ========================================================
@@ -1356,26 +1416,31 @@ def calculate_score(
     event_keywords = [
 
         "earnings",
-        "results",
+        "quarterly results",
         "guidance",
+        "acquisition",
+        "merger",
+        "takeover",
+        "bankruptcy",
 
         "rate",
         "fed",
         "fomc",
+        "central bank",
 
         "tariff",
         "sanctions",
+        "export controls",
 
         "oil",
         "crude",
         "brent",
+        "opec",
 
         "war",
         "military",
-
-        "acquisition",
-        "merger",
-        "bankruptcy",
+        "missile",
+        "ceasefire",
 
     ]
 
@@ -1392,7 +1457,7 @@ def calculate_score(
 
 
     # ========================================================
-    # 6. Opinion / Analysis 大幅降权
+    # 6. Opinion / Analysis 降权
     # ========================================================
 
     opinion_words = [
@@ -1402,6 +1467,9 @@ def calculate_score(
         "commentary",
         "editorial",
         "analysis",
+        "analyst",
+        "what we learned",
+        "what investors should know",
 
     ]
 
@@ -1414,7 +1482,7 @@ def calculate_score(
 
 
     # ========================================================
-    # 7. 低市场价值人物 / 故事类新闻降权
+    # 7. 低市场价值 / 人物故事类降权
     # ========================================================
 
     low_value_patterns = [
@@ -1424,7 +1492,9 @@ def calculate_score(
         "what we learned",
         "who's next",
         "social media fears",
-        "landmark settlement",
+        "what investors should know",
+        "life story",
+        "personal story",
 
     ]
 
@@ -1486,7 +1556,6 @@ def calculate_score(
             score
         )
     )
-
 
 # ============================================================
 # 获取新闻
