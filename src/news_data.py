@@ -429,20 +429,46 @@ CATEGORY_KEYWORDS = {
 
 EXCLUDE_KEYWORDS = [
 
-    # 评论类
+    # ========================================================
+    # 评论 / 观点类
+    # ========================================================
+
     "op-ed",
     "opinion",
     "commentary",
     "editorial",
+    "analysis:",
+    "what we learned",
+    "investing club",
+    "homestretch",
 
+    # ========================================================
+    # 司法 / 法律案件
+    # ========================================================
+
+    "court case",
+    "lawsuit",
+    "legal case",
+    "criminal case",
+    "conviction",
+    "hush money",
+    "trial",
+    "appeal",
+
+    # ========================================================
     # 娱乐
+    # ========================================================
+
     "celebrity",
     "entertainment",
     "movie",
     "music",
     "sports",
 
+    # ========================================================
     # 生活
+    # ========================================================
+
     "travel",
     "food",
     "restaurant",
@@ -634,30 +660,226 @@ def classify_news(
         f"{title} {summary}"
     )
 
-    scores = {}
 
-    for category, keywords in CATEGORY_KEYWORDS.items():
+    # ========================================================
+    # 第一优先级：宏观经济与央行政策
+    # ========================================================
 
-        score = 0
+    macro_keywords = [
 
-        for keyword in keywords:
+        "fed",
+        "federal reserve",
+        "fomc",
+        "interest rate",
+        "rate cut",
+        "rate hike",
+        "inflation",
+        "cpi",
+        "ppi",
+        "payroll",
+        "unemployment",
+        "gdp",
+        "central bank",
+        "treasury yield",
+        "bond yield",
 
-            if keyword in text:
-                score += 1
+    ]
 
-        scores[category] = score
+    if any(
+        keyword in text
+        for keyword in macro_keywords
+    ):
 
-    best_category = max(
-        scores,
-        key=scores.get
-    )
+        return "宏观经济与央行政策"
 
-    # 没有明显分类
-    if scores[best_category] == 0:
+
+    # ========================================================
+    # 第二优先级：地缘政治与制裁
+    # ========================================================
+
+    geopolitical_keywords = [
+
+        "war",
+        "conflict",
+        "military",
+        "missile",
+        "attack",
+        "strike",
+        "ceasefire",
+        "geopolitical",
+        "sanctions",
+        "tariff",
+        "trade war",
+        "export controls",
+        "iran",
+        "israel",
+        "russia",
+        "ukraine",
+        "taiwan",
+        "middle east",
+
+    ]
+
+    if any(
+        keyword in text
+        for keyword in geopolitical_keywords
+    ):
+
+        return "地缘政治与制裁"
+
+
+    # ========================================================
+    # 第三优先级：能源与大宗商品
+    # ========================================================
+
+    commodity_keywords = [
+
+        "oil",
+        "crude",
+        "brent",
+        "wti",
+        "opec",
+        "gold",
+        "silver",
+        "copper",
+        "natural gas",
+        "commodity",
+        "commodities",
+
+    ]
+
+    if any(
+        keyword in text
+        for keyword in commodity_keywords
+    ):
+
+        return "能源与大宗商品"
+
+
+    # ========================================================
+    # 第四优先级：AI与半导体
+    # ========================================================
+
+    ai_keywords = [
+
+        "artificial intelligence",
+        "ai model",
+        "ai chip",
+        "gpu",
+        "nvidia",
+        "amd",
+        "broadcom",
+        "intel",
+        "tsmc",
+        "asml",
+        "semiconductor",
+        "chip",
+        "chips",
+        "memory",
+        "hbm",
+        "optical",
+        "data center",
+        "data centre",
+        "foundry",
+
+    ]
+
+    if any(
+        keyword in text
+        for keyword in ai_keywords
+    ):
+
+        return "AI与半导体"
+
+
+    # ========================================================
+    # 第五优先级：公司重大事件
+    # ========================================================
+
+    company_keywords = [
+
+        "earnings",
+        "quarterly results",
+        "results",
+        "revenue",
+        "profit",
+        "guidance",
+        "forecast",
+        "outlook",
+        "acquisition",
+        "merger",
+        "takeover",
+        "bankruptcy",
+        "layoffs",
+        "ipo",
+
+        "nvidia",
+        "apple",
+        "microsoft",
+        "amazon",
+        "google",
+        "alphabet",
+        "meta",
+        "tesla",
+        "broadcom",
+        "amd",
+        "intel",
+        "tsmc",
+        "asml",
+        "salesforce",
+
+    ]
+
+    if any(
+        keyword in text
+        for keyword in company_keywords
+    ):
+
+        return "公司重大事件"
+
+
+    # ========================================================
+    # 第六优先级：全球金融市场
+    # ========================================================
+
+    market_keywords = [
+
+        "stock market",
+        "stocks",
+        "equity",
+        "equities",
+        "nasdaq",
+        "s&p 500",
+        "dow jones",
+        "nikkei",
+        "kospi",
+        "hang seng",
+        "market rally",
+        "market selloff",
+        "selloff",
+        "sell-off",
+        "market crash",
+        "vix",
+        "dollar",
+        "yen",
+        "yuan",
+        "forex",
+        "currency",
+        "treasury",
+        "bond",
+        "yield",
+
+    ]
+
+    if any(
+        keyword in text
+        for keyword in market_keywords
+    ):
 
         return "全球金融市场"
 
-    return best_category
+
+    return "全球金融市场"
 
 
 # ============================================================
@@ -674,6 +896,10 @@ def is_duplicate(
         title
     )
 
+    # ========================================================
+    # 1. 标题高度相似
+    # ========================================================
+
     for existing in existing_titles:
 
         similarity = SequenceMatcher(
@@ -685,6 +911,81 @@ def is_duplicate(
         if similarity >= threshold:
 
             return True
+
+
+    # ========================================================
+    # 2. 关键事件词组合去重
+    # ========================================================
+
+    event_groups = [
+
+        # Fed / Jackson Hole
+        [
+            "warsh",
+            "jackson hole",
+        ],
+
+        # Fed 利率
+        [
+            "fed",
+            "rate",
+        ],
+
+        # 通胀
+        [
+            "fed",
+            "inflation",
+        ],
+
+        # Nvidia
+        [
+            "nvidia",
+            "earnings",
+        ],
+
+        # Salesforce
+        [
+            "salesforce",
+            "ai",
+        ],
+
+        # TSMC
+        [
+            "tsmc",
+            "chip",
+        ],
+
+        # 原油
+        [
+            "oil",
+            "venezuela",
+        ],
+
+        # 伊朗
+        [
+            "iran",
+            "sanctions",
+        ],
+
+    ]
+
+
+    for group in event_groups:
+
+        if all(
+            keyword in title
+            for keyword in group
+        ):
+
+            for existing in existing_titles:
+
+                if all(
+                    keyword in existing
+                    for keyword in group
+                ):
+
+                    return True
+
 
     return False
 
