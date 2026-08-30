@@ -653,14 +653,77 @@ def is_market_relevant(
         f"{title} {summary}"
     )
 
-    return any(
-        keyword_match(
-            text,
-            keyword
-        )
-        for keyword in MARKET_KEYWORDS
-    )
 
+    # ========================================================
+    # 第一层：明确市场关键词
+    # ========================================================
+
+    if any(
+        keyword in text
+        for keyword in MARKET_KEYWORDS
+    ):
+
+        return True
+
+
+    # ========================================================
+    # 第二层：重大金融 / 公司事件
+    # ========================================================
+
+    secondary_keywords = [
+
+        # 公司重大事件
+        "earnings",
+        "quarterly results",
+        "revenue",
+        "profit",
+        "guidance",
+        "forecast",
+        "outlook",
+
+        "acquisition",
+        "merger",
+        "takeover",
+        "bankruptcy",
+
+        # 金融机构
+        "bank",
+        "banking",
+        "insurer",
+        "insurance",
+        "financial institution",
+
+        # 市场走势
+        "traders",
+        "investors",
+        "investor",
+        "shares",
+        "stocks",
+
+        # 科技产业
+        "software",
+        "cloud",
+        "data center",
+        "technology",
+
+        # 国际经济
+        "economy",
+        "economic",
+        "trade",
+        "imports",
+        "exports",
+
+    ]
+
+    if any(
+        keyword in text
+        for keyword in secondary_keywords
+    ):
+
+        return True
+
+
+    return False
 
 # ============================================================
 # 排除低价值新闻
