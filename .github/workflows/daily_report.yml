@@ -31,6 +31,13 @@ jobs:
           pwd
           echo "src目录内容："
           ls -la src
+          
+      - name: Verify news_data.py
+        run: |
+          echo "当前 Commit："
+          git rev-parse HEAD
+          echo "news_data.py 第660-670行："
+          nl -ba src/news_data.py | sed -n '660,670p'
 
       - name: Run Market Agent
         run: |
