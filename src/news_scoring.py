@@ -1,41 +1,85 @@
-from datetime import datetime, timezone
-from typing import Any, Dict, List
+# ============================================================
+# src/news_scoring.py
+# 全球金融市场日报 Agent
+#
+# 新闻筛选 / 分类 / 去重 / 重要性评分 / 展示规则
+#
+# 核心基准：
+# 1. 先筛选：只保留对金融市场具有实际影响力的信息
+# 2. 再分类：按照“事件本身是什么”进行分类
+# 3. 评分：
+#       影响范围   40分
+#       影响程度   40分
+#       来源可信度 20分
+#       总分       100分
+# 4. 取消 TOP10 总量限制
+# 5. Score > 40：全部保留
+# 6. Score <= 40：按照分类执行 Top10
+# 7. 不足10条：有几条展示几条
+# 8. 同一事件：去重、合并
+# 9. 来源不决定重要性，只影响可信度20分
+# 10. 新闻必须来自真实媒体 / 官方机构
+# 11. 无法验证的数据：明确标记“数据缺失/获取失败”
+# 12. 严禁 AI 编造新闻、行情、事件或引用
+# ============================================================
+
+import re
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
+from difflib import SequenceMatcher
+
+import feedparser
 
 
 # ============================================================
-# Global Market Agent
-# 新闻评分与筛选核心 V2.1
+# 基础配置
 # ============================================================
 
+NEWS_WINDOW_HOURS = 36
+
+# 低权重新闻每个分类最多展示10条
+LOW_WEIGHT_CATEGORY_LIMIT = 10
+
+# 高权重阈值
 HIGH_WEIGHT_THRESHOLD = 40
-LOW_WEIGHT_MAX_PER_CATEGORY = 10
 
 
 # ============================================================
-# 新闻分类
+# RSS 新闻源
 # ============================================================
 
-VALID_CATEGORIES = [
-    "宏观经济与央行政策",
-    "AI与半导体",
-    "全球金融市场",
-    "能源与大宗商品",
-    "公司重大事件",
-    "地缘政治与制裁",
-    "外汇",
-    "债券与利率",
-    "贵金属",
-    "其他市场事件",
-]
+NEWS_FEEDS = {
+    "CNBC Markets":
+        "https://www.cnbc.com/id/15839135/device/rss/rss.html",
+
+    "CNBC Finance":
+        "https://www.cnbc.com/id/10000664/device/rss/rss.html",
+
+    "CNBC World News":
+        "https://www.cnbc.com/id/100727362/device/rss/rss.html",
+
+    "CNBC Top News":
+        "https://www.cnbc.com/id/100003114/device/rss/rss.html",
+
+    "BBC Business":
+        "https://feeds.bbci.co.uk/news/business/rss.xml",
+}
 
 
 # ============================================================
 # 来源可信度
+#
+# 注意：
+# 来源可信度只负责20分。
+# 不能因为来源权威，就自动认为新闻重要。
 # ============================================================
 
 SOURCE_CREDIBILITY_SCORE = {
 
+    # --------------------------------------------------------
     # 官方 / 一手机构
+    # --------------------------------------------------------
+
     "Federal Reserve": 20,
     "U.S. Treasury": 20,
     "SEC": 20,
@@ -49,113 +93,533 @@ SOURCE_CREDIBILITY_SCORE = {
     "Nasdaq": 20,
     "CME Group": 20,
 
-    # 权威媒体
+    # --------------------------------------------------------
+    # 权威财经媒体
+    # --------------------------------------------------------
+
     "Reuters": 18,
     "Bloomberg": 18,
     "CNBC Finance": 18,
     "CNBC Markets": 18,
-    "CNBC World News": 17,
-    "CNBC Top News": 17,
     "Financial Times": 18,
     "Wall Street Journal": 18,
-    "BBC Business": 17,
     "新华社": 18,
 
+    "CNBC World News": 17,
+    "CNBC Top News": 17,
+    "BBC Business": 17,
+
+    # --------------------------------------------------------
     # 国际金融机构
+    # --------------------------------------------------------
+
     "IMF": 19,
     "BIS": 19,
     "World Bank": 19,
 }
 
 
-SOURCE_TYPE_SCORE = {
-    "official": 20,
-    "financial_institution": 19,
-    "major_media": 18,
-    "expert": 12,
-    "other_verified": 8,
-}
+DEFAULT_SOURCE_CREDIBILITY = 10
 
 
 # ============================================================
-# 文本工具
+# 新闻分类
+#
+# 分类原则：
+# “这条新闻本质上发生了什么？”
+#
+# 而不是：
+# “这条新闻里出现了什么关键词？”
 # ============================================================
 
-def clean_text(text: Any) -> str:
+CATEGORIES = [
+    "宏观经济与央行政策",
+    "AI与半导体",
+    "全球金融市场",
+    "能源与大宗商品",
+    "公司重大事件",
+    "地缘政治与制裁",
+]
+
+
+# ============================================================
+# 文本清洗
+# ============================================================
+
+def clean_text(text):
+    """
+    清洗标题 / 摘要。
+
+    注意：
+    清洗只是为了文本判断，
+    不用于计算关键词命中数量。
+    """
 
     if not text:
         return ""
 
-    return str(text).lower().strip()
+    text = str(text).lower()
+
+    text = re.sub(
+        r"<[^>]+>",
+        " ",
+        text
+    )
+
+    text = re.sub(
+        r"https?://\S+",
+        " ",
+        text
+    )
+
+    text = re.sub(
+        r"[^a-z0-9\u4e00-\u9fff\s]",
+        " ",
+        text
+    )
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
+    ).strip()
+
+    return text
 
 
-def contains_any(
-    text: str,
-    phrases: List[str]
-) -> bool:
+# ============================================================
+# 完整词匹配
+# ============================================================
 
+def contains_phrase(text, phrase):
+    """
+    判断文本是否包含一个完整事件短语。
+
+    这里只用于事件识别，
+    不统计命中次数。
+    """
+
+    text = clean_text(text)
+    phrase = clean_text(phrase)
+
+    if not text or not phrase:
+        return False
+
+    if " " in phrase:
+        return phrase in text
+
+    return re.search(
+        rf"\b{re.escape(phrase)}\b",
+        text
+    ) is not None
+
+
+def contains_any(text, phrases):
     return any(
-        phrase in text
+        contains_phrase(text, phrase)
         for phrase in phrases
     )
 
 
 # ============================================================
-# 来源可信度
+# 发布时间解析
 # ============================================================
 
-def get_source_credibility(
-    article: Dict[str, Any]
-) -> int:
+def parse_publish_time(item):
+    """
+    尝试从 RSS 获取真实发布时间。
 
-    source = article.get(
-        "source",
-        ""
+    无法解析时返回 None。
+    不猜测时间。
+    """
+
+    candidates = [
+        getattr(item, "published", ""),
+        getattr(item, "updated", ""),
+    ]
+
+    for value in candidates:
+
+        if not value:
+            continue
+
+        try:
+            dt = parsedate_to_datetime(value)
+
+            if dt.tzinfo is None:
+                dt = dt.replace(
+                    tzinfo=timezone.utc
+                )
+
+            return dt.astimezone(
+                timezone.utc
+            )
+
+        except Exception:
+            continue
+
+    parsed = getattr(
+        item,
+        "published_parsed",
+        None
     )
 
-    if source in SOURCE_CREDIBILITY_SCORE:
+    if parsed:
 
-        return SOURCE_CREDIBILITY_SCORE[source]
+        try:
+            return datetime(
+                parsed.tm_year,
+                parsed.tm_mon,
+                parsed.tm_mday,
+                parsed.tm_hour,
+                parsed.tm_min,
+                parsed.tm_sec,
+                tzinfo=timezone.utc
+            )
 
-    source_type = article.get(
-        "source_type",
-        "other_verified"
+        except Exception:
+            pass
+
+    return None
+
+
+# ============================================================
+# 时间格式
+# ============================================================
+
+def format_publish_time(dt):
+
+    if not dt:
+        return "时间缺失"
+
+    china_tz = timezone(
+        timedelta(hours=8)
     )
 
-    return SOURCE_TYPE_SCORE.get(
-        source_type,
-        8
+    return dt.astimezone(
+        china_tz
+    ).strftime(
+        "%Y-%m-%d %H:%M"
     )
 
 
 # ============================================================
-# 事件识别
-# ============================================================
+# 明确排除：
+# 这些不是“实际发生的重大市场事件”
 #
-# 重要：
-#
-# 这里不是统计关键词数量。
-#
-# 而是按照“事件本身是什么”判断。
-#
-# 优先级非常重要：
-#
-# 1. 货币政策
-# 2. 宏观数据
-# 3. 地缘
-# 4. 贸易 / 制裁
-# 5. 能源
-# 6. 公司
-# 7. AI / 半导体
-# 8. 市场价格
-# 9. 外汇
-# 10. 债券
-#
+# 注意：
+# 不是看到这些词就全部删除。
+# 只有当文章本身属于评论 / 投资建议 / 展望等内容时才排除。
 # ============================================================
 
-def identify_event_type(
-    article: Dict[str, Any]
-) -> str:
+OPINION_PATTERNS = [
+
+    "op-ed",
+    "op ed",
+    "opinion",
+    "commentary",
+    "editorial",
+    "column",
+
+    "stock picks",
+    "stocks to watch",
+    "top stock",
+    "dividend stocks",
+    "investing club",
+
+    "trading strategy",
+    "investment strategy",
+
+    "market outlook",
+    "investment outlook",
+    "investor outlook",
+
+    "what we're watching",
+    "what we are watching",
+    "week ahead",
+
+    "why investors",
+    "why markets",
+    "what we learned",
+    "what we know",
+    "what to know",
+    "the big lesson",
+]
+
+
+def is_opinion_or_strategy(title, summary=""):
+
+    title_clean = clean_text(title)
+    summary_clean = clean_text(summary)
+
+    # 标题命中评论型表达时，优先判断为评论/策略文章
+    if contains_any(
+        title_clean,
+        OPINION_PATTERNS
+    ):
+        return True
+
+    # 只有标题明确表现为观点型内容时，
+    # 才进一步检查摘要。
+    if contains_any(
+        summary_clean,
+        [
+            "investment strategy",
+            "trading strategy",
+            "stock picks",
+            "dividend stocks",
+            "market outlook",
+            "investor outlook",
+        ]
+    ):
+        return True
+
+    return False
+
+
+# ============================================================
+# 金融市场实际影响判断
+#
+# 这里不是“关键词越多越重要”。
+#
+# 判断逻辑是：
+# 文章是否描述一个已经发生 / 已确认 / 正在发生的
+# 会改变以下因素的事件：
+#
+# - 利率预期
+# - 通胀预期
+# - 经济增长预期
+# - 企业盈利
+# - 商品供需
+# - 汇率
+# - 债券收益率
+# - 股票估值
+# - 资本流动
+# - 风险偏好
+# - 制裁 / 贸易政策
+# - 地缘风险
+# ============================================================
+
+def is_market_relevant(title, summary=""):
+
+    title_clean = clean_text(title)
+    summary_clean = clean_text(summary)
+
+    text = f"{title_clean} {summary_clean}"
+
+    # --------------------------------------------------------
+    # 1. 宏观政策 / 数据
+    # --------------------------------------------------------
+
+    macro_event = contains_any(
+        text,
+        [
+            "fed decision",
+            "fed meeting",
+            "fomc",
+            "interest rate decision",
+            "rate decision",
+            "rate hike",
+            "rate cut",
+            "central bank decision",
+
+            "inflation data",
+            "cpi report",
+            "ppi report",
+            "jobs report",
+            "payroll report",
+            "employment report",
+            "gdp report",
+
+            "central bank",
+            "federal reserve",
+
+            "treasury yield",
+            "bond yield",
+        ]
+    )
+
+    if macro_event:
+        return True
+
+    # --------------------------------------------------------
+    # 2. 贸易 / 制裁 / 地缘
+    # --------------------------------------------------------
+
+    geopolitical_event = contains_any(
+        text,
+        [
+            "sanctions imposed",
+            "new sanctions",
+            "sanctions announced",
+            "export controls",
+            "export restrictions",
+
+            "tariff imposed",
+            "tariffs imposed",
+            "new tariffs",
+            "trade agreement",
+            "trade deal",
+
+            "war",
+            "military attack",
+            "missile attack",
+            "airstrike",
+            "air strikes",
+            "invasion",
+            "ceasefire",
+            "armed conflict",
+        ]
+    )
+
+    if geopolitical_event:
+        return True
+
+    # --------------------------------------------------------
+    # 3. 能源 / 大宗商品
+    # --------------------------------------------------------
+
+    commodity_event = contains_any(
+        text,
+        [
+            "opec decision",
+            "opec meeting",
+            "oil production",
+            "oil supply",
+            "oil output",
+            "crude production",
+
+            "gold price",
+            "silver price",
+            "copper price",
+
+            "oil surged",
+            "oil plunged",
+            "oil prices",
+            "crude prices",
+
+            "brent",
+            "wti",
+        ]
+    )
+
+    if commodity_event:
+        return True
+
+    # --------------------------------------------------------
+    # 4. 公司真实重大事件
+    # --------------------------------------------------------
+
+    company_event = contains_any(
+        text,
+        [
+            "earnings report",
+            "quarterly earnings",
+            "quarterly results",
+            "financial results",
+
+            "revenue rose",
+            "revenue fell",
+            "profit rose",
+            "profit fell",
+
+            "guidance raised",
+            "guidance lowered",
+            "guidance cut",
+
+            "acquisition announced",
+            "merger announced",
+            "takeover announced",
+
+            "bankruptcy filed",
+            "ipo approved",
+            "ipo launched",
+
+            "regulatory approval",
+        ]
+    )
+
+    if company_event:
+        return True
+
+    # --------------------------------------------------------
+    # 5. AI / 半导体产业重大事件
+    # --------------------------------------------------------
+
+    technology_event = contains_any(
+        text,
+        [
+            "chip export",
+            "semiconductor export",
+            "chip restrictions",
+            "semiconductor restrictions",
+
+            "chip shortage",
+            "chip supply",
+
+            "new gpu",
+            "new ai chip",
+
+            "semiconductor investment",
+            "semiconductor plant",
+
+            "foundry investment",
+
+            "nvidia earnings",
+            "tsmc earnings",
+            "broadcom earnings",
+            "amd earnings",
+        ]
+    )
+
+    if technology_event:
+        return True
+
+    # --------------------------------------------------------
+    # 6. 明确的市场价格剧烈变化
+    #
+    # 注意：
+    # 单纯“某股票上涨”不一定是重大新闻。
+    # 必须是具有明显市场意义的价格变化。
+    # --------------------------------------------------------
+
+    market_event = contains_any(
+        text,
+        [
+            "market crash",
+            "market selloff",
+            "market rout",
+
+            "stocks plunged",
+            "stocks surged",
+            "stocks tumbled",
+
+            "index plunged",
+            "index surged",
+
+            "record high",
+            "record low",
+
+            "vix surged",
+            "volatility spike",
+        ]
+    )
+
+    if market_event:
+        return True
+
+    return False
+
+
+# ============================================================
+# 事件类型识别
+#
+# 核心：
+# 不是“出现 Nvidia 就归 AI”
+# 而是判断文章描述的核心事件。
+# ============================================================
+
+def identify_event_type(article):
 
     title = clean_text(
         article.get("title", "")
@@ -167,9 +631,8 @@ def identify_event_type(
 
     text = f"{title} {summary}"
 
-
     # --------------------------------------------------------
-    # 1. 货币政策
+    # 第一优先级：真实宏观政策 / 数据事件
     # --------------------------------------------------------
 
     if contains_any(
@@ -178,194 +641,138 @@ def identify_event_type(
             "fed decision",
             "fed meeting",
             "fomc",
-            "federal reserve",
-            "fed chair",
-            "interest rate decision",
             "rate decision",
-            "rate cut",
             "rate hike",
-            "interest rate",
-            "monetary policy",
-            "hawkish",
-            "dovish",
-        ]
-    ):
+            "rate cut",
+            "central bank decision",
 
-        return "货币政策事件"
-
-
-    # --------------------------------------------------------
-    # 2. 宏观数据
-    # --------------------------------------------------------
-
-    if contains_any(
-        text,
-        [
-            "consumer price index",
-            "cpi",
-            "ppi",
-            "nonfarm payroll",
-            "payrolls",
-            "employment report",
-            "unemployment rate",
+            "cpi report",
+            "ppi report",
             "jobs report",
-            "gdp",
-            "inflation data",
-            "retail sales",
-            "economic growth",
+            "payroll report",
+            "employment report",
+            "gdp report",
         ]
     ):
-
-        return "重大宏观数据事件"
-
+        return "宏观政策或经济数据事件"
 
     # --------------------------------------------------------
-    # 3. 地缘政治
-    #
-    # 这里要求真正存在军事 / 冲突事实。
-    #
-    # 单纯出现 war / conflict 不直接判定。
+    # 第二优先级：地缘 / 制裁 / 贸易政策
     # --------------------------------------------------------
 
     if contains_any(
         text,
         [
+            "new sanctions",
+            "sanctions imposed",
+            "sanctions announced",
+            "export controls",
+            "export restrictions",
+
+            "new tariffs",
+            "tariffs imposed",
+            "trade agreement",
+            "trade deal",
+
             "military attack",
             "missile attack",
             "airstrike",
             "air strikes",
-            "missile strike",
-            "military strike",
             "invasion",
-            "armed conflict",
-            "hostilities",
             "ceasefire",
-            "troops",
-            "military operation",
+            "armed conflict",
+            "war",
         ]
     ):
-
-        return "重大地缘事件"
-
+        return "地缘政治、贸易或制裁事件"
 
     # --------------------------------------------------------
-    # 4. 制裁 / 贸易
+    # 第三优先级：能源 / 商品
     # --------------------------------------------------------
 
     if contains_any(
         text,
         [
-            "sanctions",
-            "sanction",
-            "tariffs",
-            "tariff",
-            "trade war",
-            "export controls",
-            "export ban",
-            "trade restrictions",
-            "import restrictions",
-        ]
-    ):
-
-        return "重大贸易或制裁事件"
-
-
-    # --------------------------------------------------------
-    # 5. 能源
-    # --------------------------------------------------------
-
-    if contains_any(
-        text,
-        [
-            "opec",
+            "opec decision",
             "oil production",
             "oil supply",
             "oil output",
             "crude production",
-            "oil reserves",
-            "oil reserve",
-            "oil deal",
-            "oil agreement",
-            "oil market",
-            "brent crude",
-            "wti crude",
+            "oil prices",
+            "crude prices",
+            "gold price",
+            "silver price",
+            "copper price",
         ]
     ):
-
-        return "重大能源事件"
-
+        return "能源与大宗商品事件"
 
     # --------------------------------------------------------
-    # 6. 公司资本事件
+    # 第四优先级：公司重大资本事件
     # --------------------------------------------------------
 
     if contains_any(
         text,
         [
-            "acquisition",
-            "acquires",
-            "acquired",
-            "merger",
-            "takeover",
-            "bankruptcy",
-            "ipo",
-            "initial public offering",
+            "acquisition announced",
+            "merger announced",
+            "takeover announced",
+            "bankruptcy filed",
+            "ipo approved",
+            "ipo launched",
+            "regulatory approval",
         ]
     ):
-
-        return "重大公司资本事件"
-
+        return "公司重大资本事件"
 
     # --------------------------------------------------------
-    # 7. 公司财报
+    # 第五优先级：公司财报 / 经营事件
     # --------------------------------------------------------
 
     if contains_any(
         text,
         [
-            "earnings",
-            "quarterly results",
+            "earnings report",
             "quarterly earnings",
-            "revenue",
-            "profit",
-            "guidance",
-            "earnings outlook",
+            "quarterly results",
+            "financial results",
+
+            "guidance raised",
+            "guidance lowered",
+            "guidance cut",
+
+            "revenue rose",
+            "revenue fell",
+            "profit rose",
+            "profit fell",
         ]
     ):
-
-        return "重大公司财报事件"
-
+        return "公司财报或经营事件"
 
     # --------------------------------------------------------
-    # 8. AI / 半导体产业
+    # 第六优先级：AI / 半导体产业事件
     # --------------------------------------------------------
 
     if contains_any(
         text,
         [
-            "nvidia",
-            "broadcom",
-            "amd",
-            "tsmc",
-            "asml",
-            "semiconductor",
-            "semiconductors",
-            "ai chip",
-            "artificial intelligence",
-            "gpu",
-            "hbm",
-            "memory chip",
-            "data center",
-            "data centre",
-            "optical networking",
+            "chip export",
+            "semiconductor export",
+            "chip restrictions",
+            "semiconductor restrictions",
+            "chip shortage",
+            "chip supply",
+            "new gpu",
+            "new ai chip",
+            "semiconductor investment",
+            "semiconductor plant",
+            "foundry investment",
         ]
     ):
-
         return "AI与半导体产业事件"
 
-
     # --------------------------------------------------------
-    # 9. 市场剧烈波动
+    # 第七优先级：市场价格事件
     # --------------------------------------------------------
 
     if contains_any(
@@ -373,306 +780,426 @@ def identify_event_type(
         [
             "market crash",
             "market selloff",
-            "market sell-off",
-            "selloff",
-            "sell-off",
-            "market plunge",
-            "market surge",
+            "market rout",
+            "stocks plunged",
+            "stocks surged",
+            "stocks tumbled",
+            "index plunged",
+            "index surged",
             "record high",
             "record low",
+            "vix surged",
+            "volatility spike",
         ]
     ):
-
-        return "重大市场价格变化"
-
+        return "重大金融市场价格事件"
 
     # --------------------------------------------------------
-    # 10. 外汇
+    # 默认
     # --------------------------------------------------------
 
-    if contains_any(
-        text,
-        [
-            "forex",
-            "foreign exchange",
-            "currency market",
-            "dollar",
-            "yen",
-            "yuan",
-            "exchange rate",
-        ]
-    ):
-
-        return "外汇市场事件"
-
-
-    # --------------------------------------------------------
-    # 11. 债券
-    # --------------------------------------------------------
-
-    if contains_any(
-        text,
-        [
-            "treasury yield",
-            "bond yield",
-            "bond market",
-            "treasury market",
-        ]
-    ):
-
-        return "债券市场事件"
-
-
-    return "一般市场事件"
+    return "一般金融市场信息"
 
 
 # ============================================================
 # 分类
+#
+# 分类顺序体现“事件本身”的优先级。
 # ============================================================
 
-def classify_news(
-    article: Dict[str, Any]
-) -> str:
+def classify_news(title, summary=""):
 
-    event_type = identify_event_type(
-        article
-    )
-
-
-    mapping = {
-
-        "货币政策事件":
-            "宏观经济与央行政策",
-
-        "重大宏观数据事件":
-            "宏观经济与央行政策",
-
-        "重大地缘事件":
-            "地缘政治与制裁",
-
-        "重大贸易或制裁事件":
-            "地缘政治与制裁",
-
-        "重大能源事件":
-            "能源与大宗商品",
-
-        "重大公司资本事件":
-            "公司重大事件",
-
-        "重大公司财报事件":
-            "公司重大事件",
-
-        "AI与半导体产业事件":
-            "AI与半导体",
-
-        "重大市场价格变化":
-            "全球金融市场",
-
-        "外汇市场事件":
-            "外汇",
-
-        "债券市场事件":
-            "债券与利率",
-
+    article = {
+        "title": title,
+        "summary": summary,
     }
 
-
-    return mapping.get(
-        event_type,
-        "其他市场事件"
+    event_type = identify_event_type(
+        article
     )
+
+    # --------------------------------------------------------
+    # 宏观
+    # --------------------------------------------------------
+
+    if event_type == "宏观政策或经济数据事件":
+        return "宏观经济与央行政策"
+
+    # --------------------------------------------------------
+    # 地缘
+    # --------------------------------------------------------
+
+    if event_type == "地缘政治、贸易或制裁事件":
+        return "地缘政治与制裁"
+
+    # --------------------------------------------------------
+    # 能源
+    # --------------------------------------------------------
+
+    if event_type == "能源与大宗商品事件":
+        return "能源与大宗商品"
+
+    # --------------------------------------------------------
+    # 公司
+    # --------------------------------------------------------
+
+    if event_type in [
+        "公司重大资本事件",
+        "公司财报或经营事件",
+    ]:
+        return "公司重大事件"
+
+    # --------------------------------------------------------
+    # AI / 半导体
+    # --------------------------------------------------------
+
+    if event_type == "AI与半导体产业事件":
+        return "AI与半导体"
+
+    # --------------------------------------------------------
+    # 市场
+    # --------------------------------------------------------
+
+    if event_type == "重大金融市场价格事件":
+        return "全球金融市场"
+
+    return "全球金融市场"
 
 
 # ============================================================
-# 影响范围
+# 影响范围评分
+#
+# 40分满分
+#
+# 判断：
+# - 影响多少市场
+# - 影响多少国家 / 地区
+# - 是否跨资产类别
+# - 是否影响全球资金风险偏好
+#
+# 不是关键词数量。
 # ============================================================
 
-def calculate_impact_scope(
-    article: Dict[str, Any]
-) -> int:
-
-    supplied = article.get(
-        "impact_scope"
-    )
-
-    if supplied is not None:
-
-        return max(
-            0,
-            min(
-                40,
-                int(supplied)
-            )
-        )
-
+def calculate_impact_scope(article):
 
     event_type = identify_event_type(
         article
     )
 
+    title = clean_text(
+        article.get("title", "")
+    )
 
-    # 全球货币政策
-    if event_type == "货币政策事件":
+    summary = clean_text(
+        article.get("summary", "")
+    )
 
-        return 40
+    text = f"{title} {summary}"
 
+    # --------------------------------------------------------
+    # 全球央行 / 全球宏观
+    # --------------------------------------------------------
 
-    # 全球重要宏观数据
-    if event_type == "重大宏观数据事件":
+    if event_type == "宏观政策或经济数据事件":
+
+        if contains_any(
+            text,
+            [
+                "federal reserve",
+                "fed",
+                "fomc",
+                "global",
+                "world economy",
+            ]
+        ):
+            return 40
 
         return 36
 
+    # --------------------------------------------------------
+    # 重大地缘 / 制裁 / 全球贸易
+    # --------------------------------------------------------
 
-    # 重大军事冲突
-    if event_type == "重大地缘事件":
+    if event_type == "地缘政治、贸易或制裁事件":
 
-        return 38
-
-
-    # 贸易 / 制裁
-    if event_type == "重大贸易或制裁事件":
-
-        return 35
-
-
-    # 全球能源事件
-    if event_type == "重大能源事件":
+        if contains_any(
+            text,
+            [
+                "iran",
+                "israel",
+                "russia",
+                "ukraine",
+                "china",
+                "united states",
+                "global trade",
+                "trade war",
+                "strait of hormuz",
+            ]
+        ):
+            return 38
 
         return 34
 
+    # --------------------------------------------------------
+    # 能源 / 大宗
+    # --------------------------------------------------------
 
-    # 大型资本事件
-    if event_type == "重大公司资本事件":
+    if event_type == "能源与大宗商品事件":
+        return 34
 
-        return 28
+    # --------------------------------------------------------
+    # 公司重大资本事件
+    # --------------------------------------------------------
 
-
-    # 重要财报
-    if event_type == "重大公司财报事件":
-
-        return 26
-
-
-    # AI / 半导体
-    if event_type == "AI与半导体产业事件":
-
-        return 28
-
-
-    # 市场价格变化
-    if event_type == "重大市场价格变化":
-
+    if event_type == "公司重大资本事件":
         return 30
 
+    # --------------------------------------------------------
+    # 公司财报
+    # --------------------------------------------------------
 
-    # 外汇
-    if event_type == "外汇市场事件":
+    if event_type == "公司财报或经营事件":
 
-        return 24
+        # 全球核心公司
+        if contains_any(
+            text,
+            [
+                "nvidia",
+                "apple",
+                "microsoft",
+                "amazon",
+                "alphabet",
+                "google",
+                "meta",
+                "tesla",
+                "broadcom",
+                "tsmc",
+                "asml",
+            ]
+        ):
+            return 30
 
+        return 25
 
-    # 债券
-    if event_type == "债券市场事件":
+    # --------------------------------------------------------
+    # AI / 半导体产业
+    # --------------------------------------------------------
 
-        return 24
+    if event_type == "AI与半导体产业事件":
+        return 30
 
+    # --------------------------------------------------------
+    # 市场价格
+    # --------------------------------------------------------
 
-    return 10
+    if event_type == "重大金融市场价格事件":
+        return 32
+
+    return 15
 
 
 # ============================================================
-# 影响程度
+# 影响程度评分
+#
+# 40分满分
+#
+# 判断事件是否真正改变：
+# - 利率预期
+# - 盈利预期
+# - 估值
+# - 商品供需
+# - 汇率
+# - 资本流向
+# - 风险偏好
+#
+# 不是“标题看起来很严重”。
 # ============================================================
 
-def calculate_impact_degree(
-    article: Dict[str, Any]
-) -> int:
-
-    supplied = article.get(
-        "impact_degree"
-    )
-
-    if supplied is not None:
-
-        return max(
-            0,
-            min(
-                40,
-                int(supplied)
-            )
-        )
-
+def calculate_impact_degree(article):
 
     event_type = identify_event_type(
         article
     )
 
+    title = clean_text(
+        article.get("title", "")
+    )
 
-    if event_type == "货币政策事件":
+    summary = clean_text(
+        article.get("summary", "")
+    )
 
-        return 40
+    text = f"{title} {summary}"
 
+    # --------------------------------------------------------
+    # 央行政策 / 利率
+    # --------------------------------------------------------
 
-    if event_type == "重大宏观数据事件":
+    if event_type == "宏观政策或经济数据事件":
 
-        return 34
+        if contains_any(
+            text,
+            [
+                "rate decision",
+                "rate hike",
+                "rate cut",
+                "fomc",
+                "fed decision",
+            ]
+        ):
+            return 40
 
-
-    if event_type == "重大地缘事件":
-
-        return 38
-
-
-    if event_type == "重大贸易或制裁事件":
-
-        return 34
-
-
-    if event_type == "重大能源事件":
-
-        return 34
-
-
-    if event_type == "重大公司资本事件":
-
-        return 32
-
-
-    if event_type == "重大公司财报事件":
+        if contains_any(
+            text,
+            [
+                "cpi report",
+                "jobs report",
+                "payroll report",
+                "gdp report",
+            ]
+        ):
+            return 36
 
         return 30
 
+    # --------------------------------------------------------
+    # 地缘 / 制裁
+    # --------------------------------------------------------
 
-    if event_type == "AI与半导体产业事件":
+    if event_type == "地缘政治、贸易或制裁事件":
+
+        if contains_any(
+            text,
+            [
+                "military attack",
+                "missile attack",
+                "airstrike",
+                "war",
+                "invasion",
+            ]
+        ):
+            return 40
+
+        if contains_any(
+            text,
+            [
+                "new sanctions",
+                "sanctions imposed",
+                "new tariffs",
+                "tariffs imposed",
+                "export controls",
+            ]
+        ):
+            return 36
+
+        return 30
+
+    # --------------------------------------------------------
+    # 能源
+    # --------------------------------------------------------
+
+    if event_type == "能源与大宗商品事件":
+
+        if contains_any(
+            text,
+            [
+                "oil supply",
+                "oil production",
+                "opec decision",
+            ]
+        ):
+            return 36
+
+        return 30
+
+    # --------------------------------------------------------
+    # 公司重大资本事件
+    # --------------------------------------------------------
+
+    if event_type == "公司重大资本事件":
+        return 34
+
+    # --------------------------------------------------------
+    # 公司财报
+    # --------------------------------------------------------
+
+    if event_type == "公司财报或经营事件":
+
+        if contains_any(
+            text,
+            [
+                "guidance lowered",
+                "guidance cut",
+                "profit fell",
+                "revenue fell",
+            ]
+        ):
+            return 34
+
+        if contains_any(
+            text,
+            [
+                "guidance raised",
+                "profit rose",
+                "revenue rose",
+            ]
+        ):
+            return 30
 
         return 28
 
+    # --------------------------------------------------------
+    # AI / 半导体
+    # --------------------------------------------------------
 
-    if event_type == "重大市场价格变化":
-
+    if event_type == "AI与半导体产业事件":
         return 32
 
+    # --------------------------------------------------------
+    # 市场价格
+    # --------------------------------------------------------
 
-    if event_type == "外汇市场事件":
+    if event_type == "重大金融市场价格事件":
 
-        return 22
+        if contains_any(
+            text,
+            [
+                "market crash",
+                "market rout",
+                "market selloff",
+            ]
+        ):
+            return 38
 
-
-    if event_type == "债券市场事件":
-
-        return 22
-
+        return 30
 
     return 10
 
 
 # ============================================================
-# 评分
+# 来源可信度
 # ============================================================
 
-def calculate_score(
-    article: Dict[str, Any]
-) -> int:
+def calculate_source_credibility(article):
+
+    source = article.get(
+        "source",
+        ""
+    )
+
+    return SOURCE_CREDIBILITY_SCORE.get(
+        source,
+        DEFAULT_SOURCE_CREDIBILITY
+    )
+
+
+# ============================================================
+# 总评分
+#
+# 40 + 40 + 20 = 100
+# ============================================================
+
+def calculate_score(article):
 
     scope = calculate_impact_scope(
         article
@@ -682,97 +1209,129 @@ def calculate_score(
         article
     )
 
-    credibility = get_source_credibility(
+    credibility = calculate_source_credibility(
         article
     )
 
+    score = (
+        scope
+        + degree
+        + credibility
+    )
 
     return max(
         0,
         min(
             100,
-            scope
-            + degree
-            + credibility
+            score
         )
     )
 
 
 # ============================================================
-# 标准化单条新闻
+# 事件画像
 # ============================================================
 
-def score_news(
-    article: Dict[str, Any]
-) -> Dict[str, Any]:
+def build_event_profile(article):
 
-    result = dict(
+    event_type = identify_event_type(
         article
     )
 
-
-    result["category"] = classify_news(
-        result
+    category = classify_news(
+        article.get("title", ""),
+        article.get("summary", "")
     )
 
-
-    result["event_type"] = identify_event_type(
-        result
+    scope = calculate_impact_scope(
+        article
     )
 
-
-    result["impact_scope"] = (
-        calculate_impact_scope(
-            result
-        )
+    degree = calculate_impact_degree(
+        article
     )
 
-
-    result["impact_degree"] = (
-        calculate_impact_degree(
-            result
-        )
+    credibility = calculate_source_credibility(
+        article
     )
 
-
-    result["source_credibility"] = (
-        get_source_credibility(
-            result
-        )
+    score = (
+        scope
+        + degree
+        + credibility
     )
 
-
-    result["score"] = (
-        result["impact_scope"]
-        + result["impact_degree"]
-        + result["source_credibility"]
-    )
-
-
-    return result
+    return {
+        "category": category,
+        "event_type": event_type,
+        "impact_scope": scope,
+        "impact_degree": degree,
+        "source_credibility": credibility,
+        "score": score,
+    }
 
 
 # ============================================================
-# 事件指纹
-# ============================================================
+# 新闻去重
 #
-# 用于跨媒体识别“同一个事件”。
+# 原则：
+# 1. 标题高度相似 → 去重
+# 2. 同一事件核心实体 + 事件动作 → 去重
 #
-# 当前阶段采用：
-#
-#     事件类型
-#     +
-#     核心实体
-#     +
-#     事件主题
-#
-# 后续接入 AI 后可以进一步升级。
-#
+# 注意：
+# 不因为两篇文章都提到 Fed / Iran / Nvidia 就直接认为
+# 是同一事件。
 # ============================================================
 
-def build_event_fingerprint(
-    article: Dict[str, Any]
-) -> str:
+def normalize_event_title(title):
+
+    text = clean_text(title)
+
+    remove_words = [
+        "breaking",
+        "live",
+        "update",
+        "latest",
+        "cnbc daily open",
+        "analyst roundup",
+    ]
+
+    for word in remove_words:
+        text = text.replace(
+            word,
+            " "
+        )
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
+    ).strip()
+
+    return text
+
+
+def title_similarity(title_a, title_b):
+
+    a = normalize_event_title(
+        title_a
+    )
+
+    b = normalize_event_title(
+        title_b
+    )
+
+    if not a or not b:
+        return 0
+
+    return SequenceMatcher(
+        None,
+        a,
+        b
+    ).ratio()
+
+
+def extract_event_signature(article):
 
     title = clean_text(
         article.get("title", "")
@@ -784,635 +1343,925 @@ def build_event_fingerprint(
 
     text = f"{title} {summary}"
 
+    # --------------------------------------------------------
+    # 重大事件实体
+    # --------------------------------------------------------
+
+    entities = [
+        "federal reserve",
+        "fed",
+        "fomc",
+
+        "nvidia",
+        "amd",
+        "broadcom",
+        "tsmc",
+        "asml",
+
+        "apple",
+        "microsoft",
+        "amazon",
+        "google",
+        "alphabet",
+        "meta",
+        "tesla",
+
+        "iran",
+        "israel",
+        "russia",
+        "ukraine",
+        "china",
+        "taiwan",
+        "venezuela",
+
+        "oil",
+        "brent",
+        "wti",
+        "opec",
+
+        "gold",
+        "copper",
+
+        "canada",
+        "united states",
+    ]
+
+    entity = None
+
+    for item in entities:
+
+        if contains_phrase(
+            text,
+            item
+        ):
+            entity = item
+            break
+
     event_type = identify_event_type(
         article
     )
 
+    # --------------------------------------------------------
+    # 事件动作
+    # --------------------------------------------------------
 
-    entities = []
+    actions = [
 
+        "rate hike",
+        "rate cut",
+        "rate decision",
 
-    entity_groups = {
+        "sanctions",
+        "tariffs",
+        "export controls",
 
-        "fed": [
-            "fed",
-            "federal reserve",
-            "fomc",
-            "fed chair",
-        ],
+        "attack",
+        "airstrike",
+        "missile",
+        "war",
+        "ceasefire",
 
-        "iran": [
-            "iran",
-        ],
+        "earnings",
+        "guidance",
 
-        "venezuela": [
-            "venezuela",
-            "venezuelan",
-        ],
+        "acquisition",
+        "merger",
+        "takeover",
+        "bankruptcy",
+        "ipo",
 
-        "oil": [
-            "oil",
-            "crude",
-            "opec",
-            "brent",
-            "wti",
-        ],
+        "oil production",
+        "oil supply",
 
-        "nvidia": [
-            "nvidia",
-        ],
+        "market selloff",
+        "market crash",
+        "record high",
+        "record low",
+    ]
 
-        "tsmc": [
-            "tsmc",
-        ],
+    action = None
 
-        "broadcom": [
-            "broadcom",
-        ],
+    for item in actions:
 
-        "byd": [
-            "byd",
-        ],
-
-        "us_canada": [
-            "us canada",
-            "u.s. canada",
-            "canada trade",
-            "canada tariffs",
-        ],
-
-        "russia_ukraine": [
-            "russia",
-            "ukraine",
-        ],
-
-    }
-
-
-    for entity, keywords in entity_groups.items():
-
-        if contains_any(
+        if contains_phrase(
             text,
-            keywords
+            item
         ):
-
-            entities.append(
-                entity
-            )
-
-
-    # --------------------------------------------------------
-    # 主题识别
-    # --------------------------------------------------------
-
-    topic = ""
-
-
-    if contains_any(
-        text,
-        [
-            "rate",
-            "rate cut",
-            "rate hike",
-            "hawkish",
-            "dovish",
-        ]
-    ):
-
-        topic = "rate_policy"
-
-
-    elif contains_any(
-        text,
-        [
-            "sanctions",
-            "sanction",
-        ]
-    ):
-
-        topic = "sanctions"
-
-
-    elif contains_any(
-        text,
-        [
-            "tariff",
-            "tariffs",
-            "trade war",
-        ]
-    ):
-
-        topic = "tariffs"
-
-
-    elif contains_any(
-        text,
-        [
-            "oil",
-            "crude",
-            "oil reserves",
-        ]
-    ):
-
-        topic = "oil"
-
-
-    elif contains_any(
-        text,
-        [
-            "earnings",
-            "quarterly results",
-        ]
-    ):
-
-        topic = "earnings"
-
-
-    elif contains_any(
-        text,
-        [
-            "ipo",
-            "acquisition",
-            "merger",
-        ]
-    ):
-
-        topic = "capital_event"
-
-
-    elif contains_any(
-        text,
-        [
-            "military",
-            "attack",
-            "strike",
-            "missile",
-            "war",
-        ]
-    ):
-
-        topic = "military"
-
-
-    # --------------------------------------------------------
-    # 如果没有实体
-    # 使用标题作为最后兜底
-    # --------------------------------------------------------
-
-    if not entities:
-
-        normalized_title = (
-            title
-            .replace(
-                "the ",
-                ""
-            )
-        )
-
-        return (
-            f"{event_type}|"
-            f"{topic}|"
-            f"{normalized_title}"
-        )
-
+            action = item
+            break
 
     return (
-        f"{event_type}|"
-        f"{topic}|"
-        f"{'|'.join(sorted(entities))}"
+        event_type,
+        entity,
+        action
     )
+
+
+def is_duplicate_event(
+    article,
+    existing_articles,
+    similarity_threshold=0.86
+):
+
+    title = article.get(
+        "title",
+        ""
+    )
+
+    event_type, entity, action = (
+        extract_event_signature(
+            article
+        )
+    )
+
+    for existing in existing_articles:
+
+        existing_title = existing.get(
+            "title",
+            ""
+        )
+
+        # ----------------------------------------------------
+        # 第一层：标题高度相似
+        # ----------------------------------------------------
+
+        similarity = title_similarity(
+            title,
+            existing_title
+        )
+
+        if similarity >= similarity_threshold:
+            return True
+
+        # ----------------------------------------------------
+        # 第二层：同一事件画像
+        # ----------------------------------------------------
+
+        existing_event_type, existing_entity, existing_action = (
+            extract_event_signature(
+                existing
+            )
+        )
+
+        if (
+            event_type
+            == existing_event_type
+            and entity
+            and entity == existing_entity
+            and action
+            and action == existing_action
+        ):
+            return True
+
+    return False
 
 
 # ============================================================
 # 同一事件合并
+#
+# 不重复占用展示数量。
+#
+# 规则：
+# - 保留评分最高的版本
+# - 如果另一来源提供不同信息，可合并来源
+# - 原文链接全部保留
 # ============================================================
 
-def merge_duplicate_events(
-    news_list: List[Dict[str, Any]]
-) -> List[Dict[str, Any]]:
+def merge_duplicate_event(base, duplicate):
 
-    event_groups = {}
+    # --------------------------------------------------------
+    # 来源
+    # --------------------------------------------------------
 
+    base_source = base.get(
+        "source",
+        ""
+    )
 
-    for article in news_list:
+    duplicate_source = duplicate.get(
+        "source",
+        ""
+    )
 
-        key = build_event_fingerprint(
-            article
+    sources = []
+
+    if base_source:
+        sources.append(
+            base_source
         )
 
-
-        if key not in event_groups:
-
-            event_groups[key] = []
-
-        event_groups[key].append(
-            article
+    if duplicate_source:
+        sources.append(
+            duplicate_source
         )
 
+    base["sources"] = list(
+        dict.fromkeys(sources)
+    )
 
-    merged = []
+    # --------------------------------------------------------
+    # 原文链接
+    # --------------------------------------------------------
 
+    urls = []
 
-    for key, articles in event_groups.items():
-
-        # ----------------------------------------------------
-        # 最高评分新闻作为主新闻
-        # ----------------------------------------------------
-
-        articles.sort(
-            key=lambda x: (
-                x.get(
-                    "score",
-                    0
-                ),
-                x.get(
-                    "published_at",
-                    datetime.min.replace(
-                        tzinfo=timezone.utc
-                    )
-                ),
-            ),
-            reverse=True
+    if base.get("url"):
+        urls.append(
+            base["url"]
         )
 
-
-        primary = dict(
-            articles[0]
+    if duplicate.get("url"):
+        urls.append(
+            duplicate["url"]
         )
 
+    base["urls"] = list(
+        dict.fromkeys(urls)
+    )
 
-        # ----------------------------------------------------
-        # 收集来源
-        # ----------------------------------------------------
+    # --------------------------------------------------------
+    # 来源字段保持主要来源
+    # --------------------------------------------------------
 
-        sources = []
-
-        urls = []
-
-
-        for article in articles:
-
-            source = article.get(
-                "source"
-            )
-
-            url = article.get(
-                "url"
-            )
-
-
-            if source and source not in sources:
-
-                sources.append(
-                    source
-                )
-
-
-            if url and url not in urls:
-
-                urls.append(
-                    url
-                )
-
-
-        primary["sources"] = sources
-
-        primary["urls"] = urls
-
-
-        # 主来源 / 主链接
-        primary["source"] = (
-            sources[0]
-            if sources
-            else primary.get(
-                "source",
-                ""
-            )
+    if (
+        duplicate.get("score", 0)
+        > base.get("score", 0)
+    ):
+        base["source"] = duplicate.get(
+            "source",
+            base.get("source", "")
         )
 
-        primary["url"] = (
-            urls[0]
-            if urls
-            else primary.get(
-                "url",
-                ""
-            )
+        base["url"] = duplicate.get(
+            "url",
+            base.get("url", "")
         )
 
-
-        # ----------------------------------------------------
-        # 保存合并信息
-        # ----------------------------------------------------
-
-        primary["source_count"] = len(
-            sources
+        base["title"] = duplicate.get(
+            "title",
+            base.get("title", "")
         )
 
-        primary["merged_count"] = len(
-            articles
+        base["summary"] = duplicate.get(
+            "summary",
+            base.get("summary", "")
         )
 
-
-        merged.append(
-            primary
+        base["published"] = duplicate.get(
+            "published",
+            base.get("published", "")
         )
 
+        base["published_at"] = duplicate.get(
+            "published_at",
+            base.get("published_at")
+        )
 
-    return merged
+        base["score"] = duplicate.get(
+            "score",
+            base.get("score", 0)
+        )
+
+        base["impact_scope"] = duplicate.get(
+            "impact_scope",
+            base.get("impact_scope", 0)
+        )
+
+        base["impact_degree"] = duplicate.get(
+            "impact_degree",
+            base.get("impact_degree", 0)
+        )
+
+        base["source_credibility"] = duplicate.get(
+            "source_credibility",
+            base.get("source_credibility", 0)
+        )
+
+    return base
 
 
 # ============================================================
-# 最终筛选
+# 处理单条新闻
 # ============================================================
 
-def select_news(
-    news_list: List[Dict[str, Any]]
-) -> Dict[str, List[Dict[str, Any]]]:
+def process_article(article):
 
-    # ========================================================
-    # 1. 市场影响力初筛
-    # ========================================================
+    title = article.get(
+        "title",
+        ""
+    ).strip()
 
-    relevant_news = [
+    summary = article.get(
+        "summary",
+        ""
+    ).strip()
 
+    source = article.get(
+        "source",
+        ""
+    ).strip()
+
+    url = article.get(
+        "url",
+        ""
+    ).strip()
+
+    # --------------------------------------------------------
+    # 基础真实性要求
+    # --------------------------------------------------------
+
+    if not title:
+        return None
+
+    if not url:
+        return None
+
+    if not source:
+        return None
+
+    # --------------------------------------------------------
+    # 市场相关性
+    # --------------------------------------------------------
+
+    if not is_market_relevant(
+        title,
+        summary
+    ):
+        return None
+
+    # --------------------------------------------------------
+    # 评论 / 投资建议 / 策略
+    #
+    # 注意：
+    # 如果未来增加“高影响力研究/观点”正式来源，
+    # 可以在这里单独放行。
+    # 当前 RSS 来源主要用于真实事件新闻。
+    # --------------------------------------------------------
+
+    if is_opinion_or_strategy(
+        title,
+        summary
+    ):
+        return None
+
+    # --------------------------------------------------------
+    # 分类
+    # --------------------------------------------------------
+
+    category = classify_news(
+        title,
+        summary
+    )
+
+    # --------------------------------------------------------
+    # 构建文章
+    # --------------------------------------------------------
+
+    article["category"] = category
+
+    profile = build_event_profile(
         article
+    )
 
-        for article in news_list
-
-        if article.get(
-            "market_relevant",
-            True
-        ) is not False
-
+    article["event_type"] = profile[
+        "event_type"
     ]
 
+    article["impact_scope"] = profile[
+        "impact_scope"
+    ]
 
-    # ========================================================
-    # 2. 评分
-    # ========================================================
+    article["impact_degree"] = profile[
+        "impact_degree"
+    ]
 
-    scored_news = [
+    article["source_credibility"] = profile[
+        "source_credibility"
+    ]
 
-        score_news(
-            article
+    article["score"] = profile[
+        "score"
+    ]
+
+    return article
+
+
+# ============================================================
+# 获取 RSS 新闻
+# ============================================================
+
+def fetch_news():
+
+    articles = []
+
+    since = (
+        datetime.now(
+            timezone.utc
         )
-
-        for article in relevant_news
-
-    ]
-
-
-    # ========================================================
-    # 3. 同一事件合并
-    # ========================================================
-
-    merged_news = (
-        merge_duplicate_events(
-            scored_news
+        - timedelta(
+            hours=NEWS_WINDOW_HOURS
         )
     )
 
+    print(
+        "\n============================================================"
+    )
 
-    # ========================================================
-    # 4. 按分类分组
-    # ========================================================
+    print(
+        "开始获取全球金融市场新闻"
+    )
 
-    grouped = {}
+    print(
+        f"新闻时间窗口：最近 "
+        f"{NEWS_WINDOW_HOURS} 小时"
+    )
+
+    print(
+        "============================================================"
+    )
+
+    for source, url in NEWS_FEEDS.items():
+
+        print(
+            f"\n正在获取新闻源：{source}"
+        )
+
+        try:
+
+            feed = feedparser.parse(
+                url
+            )
+
+            source_count = 0
+
+            for item in feed.entries[:50]:
+
+                title = getattr(
+                    item,
+                    "title",
+                    ""
+                ).strip()
+
+                summary = getattr(
+                    item,
+                    "summary",
+                    ""
+                ).strip()
+
+                link = getattr(
+                    item,
+                    "link",
+                    ""
+                ).strip()
+
+                if not title or not link:
+                    continue
+
+                published_at = parse_publish_time(
+                    item
+                )
+
+                # ------------------------------------------------
+                # 没有时间：
+                # 不猜测
+                # ------------------------------------------------
+
+                if not published_at:
+                    continue
+
+                # ------------------------------------------------
+                # 时间窗口
+                # ------------------------------------------------
+
+                if published_at < since:
+                    continue
+
+                article = {
+                    "title": title,
+                    "summary": summary,
+                    "source": source,
+                    "published_at": published_at,
+                    "published": format_publish_time(
+                        published_at
+                    ),
+                    "url": link,
+                }
+
+                processed = process_article(
+                    article
+                )
+
+                if processed is None:
+                    continue
+
+                articles.append(
+                    processed
+                )
+
+                source_count += 1
+
+            print(
+                f"{source} 获取到 "
+                f"{source_count} 条有效新闻"
+            )
+
+        except Exception as e:
+
+            print(
+                f"{source} 获取失败：{e}"
+            )
+
+    return articles
 
 
-    for article in merged_news:
+# ============================================================
+# 去重 + 合并
+# ============================================================
+
+def deduplicate_articles(articles):
+
+    merged_articles = []
+
+    for article in articles:
+
+        duplicate_index = None
+
+        for index, existing in enumerate(
+            merged_articles
+        ):
+
+            if is_duplicate_event(
+                article,
+                [existing]
+            ):
+                duplicate_index = index
+                break
+
+        if duplicate_index is None:
+
+            article["sources"] = [
+                article.get(
+                    "source",
+                    ""
+                )
+            ]
+
+            article["urls"] = [
+                article.get(
+                    "url",
+                    ""
+                )
+            ]
+
+            merged_articles.append(
+                article
+            )
+
+        else:
+
+            merged_articles[
+                duplicate_index
+            ] = merge_duplicate_event(
+                merged_articles[
+                    duplicate_index
+                ],
+                article
+            )
+
+    return merged_articles
+
+
+# ============================================================
+# 展示规则
+#
+# 最重要的地方：
+#
+# Score > 40
+#     → 全部保留
+#
+# Score <= 40
+#     → 按分类最多10条
+#
+# 不足10条
+#     → 有几条展示几条
+#
+# 不再存在：
+#     TOP10总量限制
+# ============================================================
+
+def select_display_news(articles):
+
+    high_weight = [
+        article
+        for article in articles
+        if article.get(
+            "score",
+            0
+        ) > HIGH_WEIGHT_THRESHOLD
+    ]
+
+    low_weight = [
+        article
+        for article in articles
+        if article.get(
+            "score",
+            0
+        ) <= HIGH_WEIGHT_THRESHOLD
+    ]
+
+    # --------------------------------------------------------
+    # 高权重：
+    # 不限制数量
+    # --------------------------------------------------------
+
+    high_weight.sort(
+        key=lambda x: (
+            x.get("score", 0),
+            x.get(
+                "published_at",
+                datetime.min.replace(
+                    tzinfo=timezone.utc
+                )
+            )
+        ),
+        reverse=True
+    )
+
+    # --------------------------------------------------------
+    # 低权重：
+    # 每个分类最多10条
+    # --------------------------------------------------------
+
+    category_buckets = {}
+
+    for article in low_weight:
 
         category = article.get(
             "category",
-            "其他市场事件"
+            "全球金融市场"
         )
 
+        if category not in category_buckets:
+            category_buckets[category] = []
 
-        if category not in VALID_CATEGORIES:
+        category_buckets[
+            category
+        ].append(article)
 
-            category = "其他市场事件"
+    low_weight_selected = []
 
-
-        if category not in grouped:
-
-            grouped[category] = []
-
-
-        grouped[category].append(
-            article
-        )
-
-
-    # ========================================================
-    # 5. 分类筛选
-    # ========================================================
-
-    final_result = {}
-
-
-    for category, items in grouped.items():
+    for category, items in category_buckets.items():
 
         items.sort(
             key=lambda x: (
-                x.get(
-                    "score",
-                    0
-                ),
+                x.get("score", 0),
                 x.get(
                     "published_at",
                     datetime.min.replace(
                         tzinfo=timezone.utc
                     )
-                ),
+                )
             ),
             reverse=True
         )
 
-
-        # ----------------------------------------------------
-        # >40
-        #
-        # 全部保留
-        # ----------------------------------------------------
-
-        high_weight = [
-
-            item
-
-            for item in items
-
-            if item.get(
-                "score",
-                0
-            ) > HIGH_WEIGHT_THRESHOLD
-
+        selected = items[
+            :LOW_WEIGHT_CATEGORY_LIMIT
         ]
 
-
-        # ----------------------------------------------------
-        # <=40
-        #
-        # 每类最多10条
-        # ----------------------------------------------------
-
-        low_weight = [
-
-            item
-
-            for item in items
-
-            if item.get(
-                "score",
-                0
-            ) <= HIGH_WEIGHT_THRESHOLD
-
-        ]
-
-
-        low_weight = low_weight[
-            :LOW_WEIGHT_MAX_PER_CATEGORY
-        ]
-
-
-        selected = (
-            high_weight
-            + low_weight
+        low_weight_selected.extend(
+            selected
         )
 
+    # --------------------------------------------------------
+    # 最终排序
+    # --------------------------------------------------------
 
-        selected.sort(
-            key=lambda x: (
-                x.get(
-                    "score",
-                    0
-                ),
-                x.get(
-                    "published_at",
-                    datetime.min.replace(
-                        tzinfo=timezone.utc
-                    )
-                ),
-            ),
-            reverse=True
-        )
+    final_articles = (
+        high_weight
+        + low_weight_selected
+    )
 
+    final_articles.sort(
+        key=lambda x: (
+            x.get("score", 0),
+            x.get(
+                "published_at",
+                datetime.min.replace(
+                    tzinfo=timezone.utc
+                )
+            )
+        ),
+        reverse=True
+    )
 
-        if selected:
-
-            final_result[
-                category
-            ] = selected
-
-
-    return final_result
+    return final_articles
 
 
 # ============================================================
-# 调试输出
+# 主函数
 # ============================================================
 
-def print_news_result(
-    result: Dict[str, List[Dict[str, Any]]]
-) -> None:
+def get_news_data():
+
+    # --------------------------------------------------------
+    # 1. 获取新闻
+    # --------------------------------------------------------
+
+    articles = fetch_news()
 
     print(
-        "\n"
-        + "=" * 70
+        "\n============================================================"
     )
 
     print(
-        "          全球金融市场重大事件"
+        f"新闻采集完成，共获得 "
+        f"{len(articles)} 条候选新闻"
     )
 
     print(
-        "=" * 70
+        "============================================================"
     )
 
+    # --------------------------------------------------------
+    # 2. 同一事件去重 / 合并
+    # --------------------------------------------------------
 
-    total = 0
+    articles = deduplicate_articles(
+        articles
+    )
+
+    print(
+        f"去重 / 合并后："
+        f"{len(articles)} 条"
+    )
+
+    # --------------------------------------------------------
+    # 3. 按重要性排序
+    # --------------------------------------------------------
+
+    articles.sort(
+        key=lambda x: (
+            x.get("score", 0),
+            x.get(
+                "published_at",
+                datetime.min.replace(
+                    tzinfo=timezone.utc
+                )
+            )
+        ),
+        reverse=True
+    )
+
+    # --------------------------------------------------------
+    # 4. 应用展示规则
+    # --------------------------------------------------------
+
+    final_articles = select_display_news(
+        articles
+    )
+
+    high_count = len([
+        article
+        for article in final_articles
+        if article.get(
+            "score",
+            0
+        ) > HIGH_WEIGHT_THRESHOLD
+    ])
+
+    low_count = len(
+        final_articles
+    ) - high_count
+
+    print(
+        "\n============================================================"
+    )
+
+    print(
+        "新闻展示规则"
+    )
+
+    print(
+        "============================================================"
+    )
+
+    print(
+        f"高权重新闻（>{HIGH_WEIGHT_THRESHOLD}）："
+        f"{high_count} 条"
+    )
+
+    print(
+        f"低权重新闻（≤{HIGH_WEIGHT_THRESHOLD}）："
+        f"{low_count} 条"
+    )
+
+    print(
+        "低权重规则：每个分类最多10条"
+    )
+
+    print(
+        f"最终展示："
+        f"{len(final_articles)} 条"
+    )
+
+    print(
+        "============================================================"
+    )
+
+    return final_articles
 
 
-    for category, articles in result.items():
+# ============================================================
+# 测试输出
+# ============================================================
+
+if __name__ == "__main__":
+
+    news = get_news_data()
+
+    print(
+        "\n========== 全球重大市场事件 ==========\n"
+    )
+
+    if not news:
 
         print(
-            f"\n【{category}】"
+            "数据缺失/获取失败："
+            "当前没有获得有效新闻"
         )
 
+    else:
 
         for index, article in enumerate(
-            articles,
+            news,
             1
         ):
 
-            total += 1
-
-
             print(
                 f"{index}. "
-                f"{article.get('title', '无标题')}"
+                f"【{article.get('category', '全球金融市场')}】"
             )
 
             print(
-                f"   事件类型："
-                f"{article.get('event_type', '未知')}"
+                f"标题："
+                f"{article.get('title', '')}"
             )
 
             print(
-                f"   影响范围："
-                f"{article.get('impact_scope', 0)}/40"
+                f"核心事实："
+                f"{article.get('summary', '')}"
             )
 
             print(
-                f"   影响程度："
-                f"{article.get('impact_degree', 0)}/40"
+                f"事件类型："
+                f"{article.get('event_type', '')}"
             )
 
             print(
-                f"   来源可信度："
-                f"{article.get('source_credibility', 0)}/20"
+                f"来源："
+                f"{article.get('source', '')}"
             )
 
             print(
-                f"   总分："
-                f"{article.get('score', 0)}/100"
+                f"时间："
+                f"{article.get('published', '时间缺失')}"
             )
 
             print(
-                f"   来源："
-                f"{'、'.join(article.get('sources', [article.get('source', '未知')]))}"
+                f"影响范围："
+                f"{article.get('impact_scope', 0)}"
             )
 
             print(
-                f"   时间："
-                f"{article.get('published', '未知')}"
+                f"影响程度："
+                f"{article.get('impact_degree', 0)}"
             )
 
             print(
-                f"   原文："
-                f"{article.get('url', '无')}"
+                f"来源可信度："
+                f"{article.get('source_credibility', 0)}"
             )
 
-            if article.get(
-                "merged_count",
-                1
+            print(
+                f"总分："
+                f"{article.get('score', 0)}"
+            )
+
+            print(
+                f"原文："
+                f"{article.get('url', '')}"
+            )
+
+            # 如果同一事件经过多个来源验证，
+            # 输出全部来源
+            if len(
+                article.get("sources", [])
             ) > 1:
 
                 print(
-                    f"   已合并："
-                    f"{article['merged_count']} 条同事件新闻"
+                    f"交叉验证来源："
+                    f"{', '.join(article['sources'])}"
                 )
 
             print()
-
-
-    print(
-        "=" * 70
-    )
-
-    print(
-        f"新闻总数：{total}"
-    )
-
-    print(
-        "=" * 70
-    )
