@@ -30,7 +30,7 @@ from google import genai
 # Gemini 模型
 # ============================================================
 
-GEMINI_MODEL = "gemini-2.5-flash"
+MODEL_NAME = "gemini-3.6-flash"
 
 
 # ============================================================
