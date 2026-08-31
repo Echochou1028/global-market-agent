@@ -1145,419 +1145,178 @@ def is_duplicate(
 
 
 # ============================================================
-# 新闻重要性评分
+# 新闻重要性评分 V1.1
 # ============================================================
+# 核心原则：先判断信息是否具有金融市场价值，再评分。
+# 评分维度固定为：影响范围 40 + 影响程度 40 + 来源可信度 20。
+# 时效性不参与重要性评分；仅用于新闻窗口控制、排序及去重。
+# 来源不决定新闻是否重要，只影响可信度。
 
-def calculate_score(
-    article
-):
+SOURCE_CREDIBILITY_SCORE = {
+    # 第一优先级：官方 / 交易所一手信息
+    "Federal Reserve": 20,
+    "U.S. Treasury": 20,
+    "SEC": 20,
+    "BEA": 20,
+    "BLS": 20,
+    "PBOC": 20,
+    "NBS China": 20,
+    "CSRC": 20,
+    "HKEX": 20,
+    "NYSE": 20,
+    "Nasdaq": 20,
+    "CME Group": 20,
 
-    title = clean_text(
-        article["title"]
-    )
+    # 第二优先级：权威财经媒体
+    "Reuters": 18,
+    "Bloomberg": 18,
+    "CNBC Finance": 18,
+    "CNBC Markets": 18,
+    "CNBC World News": 17,
+    "CNBC Top News": 17,
+    "Financial Times": 18,
+    "Wall Street Journal": 18,
+    "BBC Business": 17,
+    "新华社": 18,
 
-    summary = clean_text(
-        article.get(
-            "summary",
-            ""
-        )
-    )
+    # 第三优先级：国际金融机构
+    "IMF": 19,
+    "BIS": 19,
+    "World Bank": 19,
+}
 
+
+def _event_profile(article):
+    """根据文章已经识别出的事件类别和事实性信息建立事件画像。
+
+    注意：这里不再统计关键词命中数量。关键词仅作为现有RSS文本
+    分类/事件识别的基础；最终分数由事件类型的市场经济含义决定。
+    """
+    title = clean_text(article.get("title", ""))
+    summary = clean_text(article.get("summary", ""))
+    text = f"{title} {summary}"
+    category = article.get("category", "全球金融市场")
+
+    event_type = "一般市场信息"
+
+    # 真实政策/宏观事件
+    if any(x in text for x in [
+        "rate decision", "rate hike", "rate cut", "interest rate",
+        "fed", "fomc", "central bank", "inflation", "cpi", "ppi",
+        "payroll", "gdp", "tariff", "sanctions", "export controls"
+    ]):
+        event_type = "政策或宏观事件"
+
+    # 地缘重大事件
+    elif any(x in text for x in [
+        "war", "military attack", "missile", "invasion",
+        "ceasefire", "conflict", "geopolitical"
+    ]):
+        event_type = "重大地缘事件"
+
+    # 公司重大资本事件
+    elif any(x in text for x in [
+        "acquisition", "merger", "takeover", "bankruptcy", "ipo"
+    ]):
+        event_type = "重大公司资本事件"
+
+    # 财报/经营结果
+    elif any(x in text for x in [
+        "earnings", "quarterly results", "revenue", "profit", "guidance"
+    ]):
+        event_type = "重大财报或经营事件"
+
+    # 市场价格/风险偏好变化
+    elif any(x in text for x in [
+        "market crash", "market selloff", "selloff", "sell-off",
+        "surge", "plunge", "soar", "slump", "tumble",
+        "record high", "record low"
+    ]):
+        event_type = "重大市场价格变化"
+
+    # 研究/观点：只有来源本身具备高影响力才有资格进入新闻池；
+    # 是否具有市场价值由影响范围和影响程度决定。
+    elif any(x in title for x in [
+        "analysis", "opinion", "outlook", "forecast", "why ",
+        "how ", "the big lesson", "what we learned"
+    ]):
+        event_type = "高影响力研究或观点"
+
+    return category, event_type
+
+
+def _impact_scope_score(article):
+    """影响范围：0-40。判断影响市场、国家、行业、资产类别和参与者的广度。"""
+    category, event_type = _event_profile(article)
+
+    if event_type == "政策或宏观事件":
+        return 40
+    if event_type == "重大地缘事件":
+        return 38
+
+    if category == "能源与大宗商品":
+        return 32 if event_type != "高影响力研究或观点" else 24
+
+    if category == "全球金融市场":
+        return 32 if event_type in ["重大市场价格变化", "政策或宏观事件"] else 24
+
+    if category == "AI与半导体":
+        return 30 if event_type in ["重大公司资本事件", "重大财报或经营事件"] else 22
+
+    if category == "公司重大事件":
+        return 28 if event_type in ["重大公司资本事件", "重大财报或经营事件"] else 20
+
+    return 20
+
+
+def _impact_degree_score(article):
+    """影响程度：0-40。判断是否改变价格、估值、政策预期、资金流向、风险偏好或经营预期。"""
+    category, event_type = _event_profile(article)
+    title = clean_text(article.get("title", ""))
+    summary = clean_text(article.get("summary", ""))
     text = f"{title} {summary}"
 
-    score = 0
+    if event_type == "政策或宏观事件":
+        return 40
+    if event_type == "重大地缘事件":
+        return 38
+    if event_type == "重大公司资本事件":
+        return 34
+    if event_type == "重大财报或经营事件":
+        return 30
+    if event_type == "重大市场价格变化":
+        return 32
+
+    if event_type == "高影响力研究或观点":
+        # 观点只有在明确涉及政策、资产价格、估值或资金流向时才获得较高分。
+        if any(x in text for x in [
+            "policy", "rate", "tariff", "sanctions", "yield",
+            "valuation", "capital flows", "market impact", "price"
+        ]):
+            return 24
+        return 12
+
+    return 10
 
 
-    # ========================================================
-    # 1. 市场影响范围：0-30
-    # ========================================================
-
-    scope_keywords = [
-
-        # 宏观 / 央行
-        "fed",
-        "federal reserve",
-        "fomc",
-        "central bank",
-        "interest rate",
-        "rate cut",
-        "rate hike",
-        "inflation",
-        "cpi",
-        "ppi",
-        "payroll",
-        "unemployment",
-        "gdp",
-
-        # 贸易 / 地缘政治
-        "tariff",
-        "trade war",
-        "sanctions",
-        "war",
-        "military",
-        "geopolitical",
-        "export controls",
-
-        # 能源 / 大宗商品
-        "opec",
-        "oil",
-        "crude",
-        "brent",
-        "wti",
-        "gold",
-        "commodity",
-        "commodities",
-
-        # 全球金融市场
-        "global market",
-        "stock market",
-        "stocks",
-        "equities",
-        "market crash",
-        "market selloff",
-        "selloff",
-        "sell-off",
-        "bond",
-        "treasury",
-        "yield",
-        "dollar",
-        "yen",
-        "forex",
-
-    ]
-
-    scope_hits = sum(
-        1
-        for word in scope_keywords
-        if word in text
-    )
-
-    if scope_hits >= 5:
-        score += 30
-
-    elif scope_hits == 4:
-        score += 28
-
-    elif scope_hits == 3:
-        score += 25
-
-    elif scope_hits == 2:
-        score += 20
-
-    elif scope_hits == 1:
-        score += 13
-
-    else:
-        score += 5
-
-
-    # ========================================================
-    # 2. 直接市场冲击：0-25
-    # ========================================================
-
-    direct_impact_keywords = [
-
-        # 政策 / 宏观
-        "rate hike",
-        "rate cut",
-        "interest rate",
-        "inflation",
-        "cpi",
-        "ppi",
-        "payroll",
-        "unemployment",
-        "gdp",
-
-        # 市场剧烈波动
-        "market crash",
-        "market selloff",
-        "selloff",
-        "sell-off",
-        "surge",
-        "plunge",
-        "soar",
-        "slump",
-        "tumble",
-        "rally",
-        "record high",
-        "record low",
-
-        # 公司重大事件
-        "earnings",
-        "quarterly results",
-        "revenue",
-        "profit",
-        "guidance",
-        "forecast",
-        "outlook",
-        "acquisition",
-        "merger",
-        "takeover",
-        "bankruptcy",
-        "layoffs",
-        "ipo",
-
-        # 能源
-        "oil",
-        "crude",
-        "brent",
-        "wti",
-        "opec",
-
-        # 地缘 / 政策
-        "sanctions",
-        "tariff",
-        "trade war",
-        "export controls",
-        "military attack",
-        "missile",
-        "ceasefire",
-
-    ]
-
-    impact_hits = sum(
-        1
-        for word in direct_impact_keywords
-        if word in text
-    )
-
-    if impact_hits >= 5:
-        score += 25
-
-    elif impact_hits == 4:
-        score += 23
-
-    elif impact_hits == 3:
-        score += 20
-
-    elif impact_hits == 2:
-        score += 16
-
-    elif impact_hits == 1:
-        score += 10
-
-    else:
-        score += 4
-
-
-    # ========================================================
-    # 3. 龙头公司 / 核心资产：0-15
-    # ========================================================
-
-    major_assets = [
-
-        "nvidia",
-        "apple",
-        "microsoft",
-        "amazon",
-        "alphabet",
-        "google",
-        "meta",
-        "tesla",
-        "broadcom",
-        "amd",
-        "intel",
-        "tsmc",
-        "asml",
-        "salesforce",
-        "crowdstrike",
-        "berkshire",
-
-    ]
-
-    asset_hits = sum(
-        1
-        for word in major_assets
-        if word in text
-    )
-
-    if asset_hits >= 3:
-        score += 15
-
-    elif asset_hits == 2:
-        score += 11
-
-    elif asset_hits == 1:
-        score += 7
-
-
-    # ========================================================
-    # 4. 来源可信度：0-10
-    # ========================================================
-
-    score += SOURCE_PRIORITY.get(
-        article["source"],
-        5
+def _source_credibility_score(article):
+    source = article.get("source", "")
+    return SOURCE_CREDIBILITY_SCORE.get(
+        source,
+        SOURCE_PRIORITY.get(source, 10) * 2
     )
 
 
-    # ========================================================
-    # 5. 重大事件类型：0-10
-    # ========================================================
-
-    event_keywords = [
-
-        # 宏观 / 央行
-        "rate hike",
-        "rate cut",
-        "interest rate",
-        "fed",
-        "fomc",
-        "inflation",
-        "cpi",
-        "payroll",
-        "gdp",
-
-        # 地缘 / 贸易
-        "tariff",
-        "sanctions",
-        "trade war",
-        "military attack",
-        "war",
-
-        # 能源
-        "opec",
-        "oil",
-        "crude",
-        "brent",
-
-        # 公司重大事件
-        "earnings",
-        "quarterly results",
-        "acquisition",
-        "merger",
-        "takeover",
-        "bankruptcy",
-
-    ]
-
-    if any(
-        word in title
-        for word in event_keywords
-    ):
-
-        score += 10
-
-    else:
-
-        score += 4
-
-
-    # ========================================================
-    # 6. Opinion / Analysis 降权
-    # ========================================================
-
-    opinion_words = [
-
-        "op-ed",
-        "opinion",
-        "commentary",
-        "editorial",
-        "analysis",
-
-        "why",
-        "how",
-        "what we learned",
-        "the big lesson",
-        "playbook",
-        "who's next",
-
-    ]
-
-    if any(
-        word in title
-        for word in opinion_words
-    ):
-
-        score -= 20
-
-
-    # ========================================================
-    # 7. 低市场价值 / 人物故事 / 投资推荐降权
-    # ========================================================
-
-    low_value_patterns = [
-
-        # 人物 / 故事
-        "birthday",
-        "remains active",
-        "what we learned",
-        "who's next",
-
-        # 社会 / 故事型
-        "social media fears",
-        "landmark settlement",
-
-        # 投资推荐
-        "top stocks",
-        "best stocks",
-        "dividend stocks",
-        "stocks to buy",
-        "stocks to watch",
-        "analysts suggest",
-        "stock picks",
-        "investment ideas",
-        "for consistent income",
-        "how to invest",
-
-    ]
-
-    if any(
-        word in title
-        for word in low_value_patterns
-    ):
-
-        score -= 15
-
-
-    # ========================================================
-    # 8. 时效性：0-20
-    # ========================================================
-
-    published_at = article.get(
-        "published_at"
-    )
-
-    if published_at:
-
-        now = datetime.now(
-            timezone.utc
-        )
-
-        hours = (
-            now - published_at
-        ).total_seconds() / 3600
-
-        if hours <= 6:
-
-            score += 20
-
-        elif hours <= 12:
-
-            score += 17
-
-        elif hours <= 24:
-
-            score += 14
-
-        elif hours <= 36:
-
-            score += 10
-
-        else:
-
-            score += 2
-
-
-    # ========================================================
-    # 最终限制：0-100
-    # ========================================================
+def calculate_score(article):
+    scope = _impact_scope_score(article)
+    degree = _impact_degree_score(article)
+    credibility = _source_credibility_score(article)
 
     return max(
         0,
         min(
             100,
-            score
+            scope + degree + credibility
         )
     )
 
@@ -1687,15 +1446,10 @@ def get_news_data():
 
 
                 # =================================================
-                # 排除低价值资讯
+                # 重要性评分取代旧的 EXCLUDE_KEYWORDS 硬过滤
                 # =================================================
-
-                if is_excluded(
-                    title,
-                    summary
-                ):
-
-                    continue
+                # 高影响力研报/观点允许进入评分；普通低价值观点将由
+                # 影响范围、影响程度和来源可信度自然获得较低分。
 
 
                 # =================================================
@@ -1787,13 +1541,27 @@ def get_news_data():
 
 
     # ========================================================
-    # TOP10
+    # 展示层：高权重全部保留；低权重最多10条
     # ========================================================
+    # 高权重定义：Score > 40
+    # 低权重定义：Score <= 40
+    # 评分与展示数量解耦。
 
-    top_news = articles[
-        :MAX_NEWS
+    high_weight_news = [
+        article
+        for article in articles
+        if article["score"] > 40
     ]
 
+    low_weight_news = [
+        article
+        for article in articles
+        if article["score"] <= 40
+    ]
+
+    low_weight_news = low_weight_news[:MAX_NEWS]
+
+    top_news = high_weight_news + low_weight_news
 
     print(
         f"\n原始有效新闻："
@@ -1801,7 +1569,17 @@ def get_news_data():
     )
 
     print(
-        f"最终 TOP{MAX_NEWS}："
+        f"高权重新闻（>40）："
+        f"{len(high_weight_news)} 条"
+    )
+
+    print(
+        f"低权重新闻（<=40，最多{MAX_NEWS}条）："
+        f"{len(low_weight_news)} 条"
+    )
+
+    print(
+        f"最终展示："
         f"{len(top_news)} 条"
     )
 
@@ -1819,7 +1597,7 @@ if __name__ == "__main__":
 
 
     print(
-        "\n========== TOP10重大市场事件 ==========\n"
+        "\n========== 重大市场事件 ==========\n"
     )
 
 
