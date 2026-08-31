@@ -663,8 +663,7 @@ if __name__ == "__main__":
 
             print(
                 f"核心事实："
-                f"{article.get('core_fact') "
-                or article.get('summary', '')}"
+                f"{article.get('core_fact') or article.get('summary', '')}"
             )
 
             print(
