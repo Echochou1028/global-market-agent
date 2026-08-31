@@ -4,6 +4,7 @@ from email.utils import parsedate_to_datetime
 
 import feedparser
 
+from ai_news_analyzer import analyze_news_list
 from news_scoring import select_news
 
 
@@ -16,35 +17,19 @@ from news_scoring import select_news
 # 1. 从真实新闻源获取新闻
 # 2. 解析新闻基本信息
 # 3. 过滤时间窗口
-# 4. 进行金融市场相关性初筛
-# 5. 输出标准新闻数据
+# 4. 交给 AI 判断是否真正具有金融市场影响
+# 5. 交给 AI 按“事件本身”进行分类
+# 6. 交给 news_scoring.py 执行最终硬规则
 #
 # news_scoring.py 负责：
 #
-# 1. 事件识别
-# 2. 新闻分类
-# 3. 同一事件去重 / 合并
-# 4. 影响范围评分
-# 5. 影响程度评分
-# 6. 来源可信度评分
-# 7. 总分计算
-# 8. >40分全部保留
-# 9. <=40分按分类最多10条
-#
-# 核心原则：
-#
-# 先筛选：
-#     只采集对金融市场具有实际影响力的信息
-#
-# 再分类：
-#     按“事件本身是什么”确定分类
-#
-# 再评分：
-#     影响范围 40
-#     影响程度 40
-#     来源可信度 20
-#
-# 来源不决定新闻重要性。
+# 1. 影响范围：40分
+# 2. 影响程度：40分
+# 3. 来源可信度：20分
+# 4. 总分：100分
+# 5. 同一事件去重、合并
+# 6. >40 分：全部保留
+# 7. <=40 分：分类 Top10
 #
 # ============================================================
 
@@ -166,13 +151,10 @@ def parse_publish_time(item):
             )
 
         except Exception:
-
             pass
 
 
-    # ========================================================
-    # feedparser parsed time
-    # ========================================================
+    # feedparser 时间结构
 
     parsed = getattr(
         item,
@@ -195,7 +177,6 @@ def parse_publish_time(item):
             )
 
         except Exception:
-
             pass
 
 
@@ -224,316 +205,6 @@ def format_publish_time(dt):
 
 
 # ============================================================
-# 金融市场相关性初筛关键词
-#
-# 注意：
-#
-# 这里只负责从 RSS 海量内容中找到“可能与金融市场
-# 有关”的候选新闻。
-#
-# 不在这里判断：
-#
-# - 新闻是否重大
-# - 新闻影响范围
-# - 新闻影响程度
-# - 新闻最终评分
-# - 新闻最终分类
-#
-# 这些全部交给 news_scoring.py。
-# ============================================================
-
-MARKET_RELEVANCE_KEYWORDS = [
-
-    # --------------------------------------------------------
-    # 宏观经济 / 央行
-    # --------------------------------------------------------
-
-    "fed",
-    "federal reserve",
-    "fomc",
-    "interest rate",
-    "rate cut",
-    "rate hike",
-    "inflation",
-    "cpi",
-    "ppi",
-    "payroll",
-    "employment",
-    "unemployment",
-    "gdp",
-    "central bank",
-    "monetary policy",
-    "fiscal policy",
-
-    # --------------------------------------------------------
-    # 股票市场
-    # --------------------------------------------------------
-
-    "stock market",
-    "stocks",
-    "equity",
-    "equities",
-    "nasdaq",
-    "s&p 500",
-    "dow jones",
-    "nikkei",
-    "kospi",
-    "hang seng",
-    "vix",
-    "market rally",
-    "market selloff",
-    "selloff",
-    "sell-off",
-    "market crash",
-    "shares",
-
-    # --------------------------------------------------------
-    # AI / 半导体
-    # --------------------------------------------------------
-
-    "artificial intelligence",
-    "ai model",
-    "ai chip",
-    "gpu",
-    "semiconductor",
-    "chip",
-    "chips",
-    "memory",
-    "hbm",
-    "optical",
-    "optical networking",
-    "data center",
-    "data centre",
-    "foundry",
-
-    "nvidia",
-    "amd",
-    "broadcom",
-    "intel",
-    "tsmc",
-    "asml",
-
-    # --------------------------------------------------------
-    # 公司重大事件
-    # --------------------------------------------------------
-
-    "earnings",
-    "quarterly results",
-    "revenue",
-    "profit",
-    "guidance",
-    "forecast",
-    "acquisition",
-    "merger",
-    "takeover",
-    "bankruptcy",
-    "ipo",
-
-    # --------------------------------------------------------
-    # 能源 / 商品
-    # --------------------------------------------------------
-
-    "oil",
-    "crude",
-    "brent",
-    "wti",
-    "opec",
-    "gold",
-    "silver",
-    "copper",
-    "natural gas",
-    "commodity",
-    "commodities",
-
-    # --------------------------------------------------------
-    # 外汇 / 债券
-    # --------------------------------------------------------
-
-    "dollar",
-    "yen",
-    "yuan",
-    "forex",
-    "currency",
-    "treasury",
-    "bond",
-    "yield",
-
-    # --------------------------------------------------------
-    # 国际贸易 / 制裁
-    # --------------------------------------------------------
-
-    "tariff",
-    "tariffs",
-    "trade war",
-    "sanction",
-    "sanctions",
-    "export controls",
-    "export restriction",
-
-    # --------------------------------------------------------
-    # 地缘政治
-    # --------------------------------------------------------
-
-    "war",
-    "conflict",
-    "military",
-    "missile",
-    "attack",
-    "strike",
-    "ceasefire",
-    "geopolitical",
-
-    "iran",
-    "israel",
-    "russia",
-    "ukraine",
-    "taiwan",
-    "middle east",
-
-]
-
-
-# ============================================================
-# 明显非金融内容
-#
-# 注意：
-# 这里只排除明显与金融市场无关的内容。
-#
-# 不再把：
-#
-# analysis
-# opinion
-# outlook
-# forecast
-#
-# 等直接排除。
-#
-# 因为高影响力研究 / 观点仍然允许进入候选池，
-# 最终是否保留由 news_scoring.py 判断。
-# ============================================================
-
-EXCLUDE_KEYWORDS = [
-
-    # 娱乐
-    "celebrity",
-    "entertainment",
-    "movie",
-    "music",
-    "sports",
-
-    # 生活方式
-    "travel",
-    "food",
-    "restaurant",
-    "lifestyle",
-
-]
-
-
-# ============================================================
-# 关键词匹配
-# ============================================================
-
-def contains_keyword(
-    text,
-    keyword
-):
-
-    text = clean_text(text)
-
-    keyword = clean_text(keyword)
-
-    if not text or not keyword:
-
-        return False
-
-    # 多词关键词
-    if " " in keyword:
-
-        return keyword in text
-
-    # 单词关键词使用完整单词
-    pattern = rf"\b{re.escape(keyword)}\b"
-
-    return re.search(
-        pattern,
-        text
-    ) is not None
-
-
-# ============================================================
-# 判断是否明显非金融内容
-# ============================================================
-
-def is_excluded(
-    title,
-    summary=""
-):
-
-    text = clean_text(
-        f"{title} {summary}"
-    )
-
-    for keyword in EXCLUDE_KEYWORDS:
-
-        if contains_keyword(
-            text,
-            keyword
-        ):
-
-            return True
-
-    return False
-
-
-# ============================================================
-# 判断是否可能与金融市场相关
-#
-# 重要：
-#
-# 这里是“候选池初筛”，不是最终重要性判断。
-#
-# ============================================================
-
-def is_market_relevant(
-    title,
-    summary=""
-):
-
-    text = clean_text(
-        f"{title} {summary}"
-    )
-
-    # --------------------------------------------------------
-    # 第一层：明显非金融内容
-    # --------------------------------------------------------
-
-    if is_excluded(
-        title,
-        summary
-    ):
-
-        return False
-
-
-    # --------------------------------------------------------
-    # 第二层：金融市场相关关键词
-    # --------------------------------------------------------
-
-    for keyword in MARKET_RELEVANCE_KEYWORDS:
-
-        if contains_keyword(
-            text,
-            keyword
-        ):
-
-            return True
-
-
-    return False
-
-
-# ============================================================
 # 获取原始新闻
 # ============================================================
 
@@ -549,7 +220,6 @@ def get_raw_news():
             hours=NEWS_WINDOW_HOURS
         )
     )
-
 
     print(
         "\n============================================================"
@@ -570,7 +240,7 @@ def get_raw_news():
 
 
     # ========================================================
-    # 遍历 RSS 新闻源
+    # 遍历 RSS
     # ========================================================
 
     for source, url in NEWS_FEEDS.items():
@@ -584,7 +254,6 @@ def get_raw_news():
             feed = feedparser.parse(
                 url
             )
-
 
             if getattr(
                 feed,
@@ -601,7 +270,7 @@ def get_raw_news():
 
 
             # ------------------------------------------------
-            # 最多读取前50条
+            # 每个 RSS 最多读取 50 条
             # ------------------------------------------------
 
             for item in feed.entries[:50]:
@@ -630,11 +299,9 @@ def get_raw_news():
                 # ------------------------------------------------
 
                 if not title:
-
                     continue
 
                 if not link:
-
                     continue
 
 
@@ -649,14 +316,9 @@ def get_raw_news():
                 )
 
 
-                # ------------------------------------------------
-                # 无法确认发布时间
-                #
+                # 无法确认时间
                 # 不猜测
-                # ------------------------------------------------
-
                 if not published_at:
-
                     continue
 
 
@@ -665,24 +327,11 @@ def get_raw_news():
                 # ------------------------------------------------
 
                 if published_at < since:
-
                     continue
 
 
                 # ------------------------------------------------
-                # 市场相关性初筛
-                # ------------------------------------------------
-
-                if not is_market_relevant(
-                    title,
-                    summary
-                ):
-
-                    continue
-
-
-                # ------------------------------------------------
-                # 标准新闻对象
+                # 建立标准新闻对象
                 # ------------------------------------------------
 
                 article = {
@@ -710,17 +359,30 @@ def get_raw_news():
                     "url":
                         link,
 
-                    # 后续由 news_scoring.py 确定
+                    # ==================================================
+                    # 以下字段交给 AI / news_scoring.py
+                    # ==================================================
+
                     "category":
                         None,
 
-                    # 后续由 news_scoring.py 确定
                     "event_id":
                         None,
 
-                    # 候选池标记
+                    "event_key":
+                        None,
+
+                    "event_type":
+                        None,
+
+                    "core_fact":
+                        None,
+
+                    "market_impact_reason":
+                        None,
+
                     "market_relevant":
-                        True,
+                        None,
 
                 }
 
@@ -734,7 +396,7 @@ def get_raw_news():
 
             print(
                 f"{source} 获取到 "
-                f"{source_count} 条候选新闻"
+                f"{source_count} 条新闻"
             )
 
 
@@ -745,17 +407,13 @@ def get_raw_news():
             )
 
 
-    # ========================================================
-    # 采集结果
-    # ========================================================
-
     print(
         "\n============================================================"
     )
 
     print(
         f"新闻采集完成，共获得 "
-        f"{len(articles)} 条候选新闻"
+        f"{len(articles)} 条新闻"
     )
 
     print(
@@ -774,7 +432,7 @@ def get_news_data():
 
     # --------------------------------------------------------
     # 第一步
-    # 获取真实新闻
+    # 从真实 RSS 新闻源获取新闻
     # --------------------------------------------------------
 
     raw_news = get_raw_news()
@@ -792,67 +450,128 @@ def get_news_data():
 
     # --------------------------------------------------------
     # 第二步
-    # 进入统一评分 / 事件识别 / 分类模块
+    # Gemini AI 分析新闻
+    #
+    # AI负责：
+    #
+    # 1. 是否真正具有金融市场影响
+    # 2. 事件本身是什么
+    # 3. 新闻分类
+    # 4. 核心事实
+    # 5. 同一事件识别依据
     # --------------------------------------------------------
 
-    try:
+    print(
+        "\n============================================================"
+    )
 
-        result = select_news(
-            raw_news
-        )
+    print(
+        "进入 AI 新闻事件分析"
+    )
 
-    except Exception as e:
+    print(
+        "============================================================"
+    )
+
+
+    analyzed_news = analyze_news_list(
+        raw_news
+    )
+
+
+    # --------------------------------------------------------
+    # 第三步
+    # 只保留 AI 判断为真正具有金融市场影响的新闻
+    #
+    # 注意：
+    #
+    # 这里不是评分。
+    #
+    # 只是执行“金融市场相关性”判断。
+    # --------------------------------------------------------
+
+    market_news = [
+
+        article
+
+        for article in analyzed_news
+
+        if article.get(
+            "market_relevant",
+            False
+        ) is True
+
+    ]
+
+
+    print(
+        "\n============================================================"
+    )
+
+    print(
+        f"AI判断具有实际金融市场影响的新闻："
+        f"{len(market_news)}"
+    )
+
+    print(
+        "============================================================"
+    )
+
+
+    if not market_news:
 
         print(
-            "\n新闻评分模块执行失败："
-            f"{e}"
-        )
-
-        print(
-            "数据缺失/获取失败："
-            "无法生成最终新闻结果"
+            "\n数据缺失/获取失败："
+            "AI分析后没有发现具有实际金融市场影响的新闻"
         )
 
         return []
 
 
     # --------------------------------------------------------
-    # 第三步
-    # 整理分类结果
+    # 第四步
+    # 进入 news_scoring.py
     #
-    # select_news() 返回：
+    # news_scoring.py 只执行已经确定的硬规则：
     #
-    # {
-    #     "宏观经济与央行政策": [...],
-    #     "AI与半导体": [...],
-    #     ...
-    # }
+    # 影响范围       40
+    # 影响程度       40
+    # 来源可信度     20
     #
+    # 总分            100
+    #
+    # >40             全部保留
+    #
+    # <=40            按分类 Top10
+    #
+    # 同一事件         去重 / 合并
+    # --------------------------------------------------------
+
+    result = select_news(
+        market_news
+    )
+
+
+    # --------------------------------------------------------
+    # 第五步
+    # 将分类结果重新整理成列表
     # --------------------------------------------------------
 
     final_news = []
 
 
-    if not result:
-
-        print(
-            "\n数据缺失/获取失败："
-            "评分模块没有返回有效新闻"
-        )
-
-        return []
-
-
     for category, news_list in result.items():
-
-        if not news_list:
-
-            continue
-
 
         for article in news_list:
 
-            article["category"] = category
+            # 如果评分模块没有分类，
+            # 使用 AI 已确定的分类
+            article["category"] = (
+                article.get(
+                    "category"
+                )
+                or category
+            )
 
             final_news.append(
                 article
@@ -861,19 +580,12 @@ def get_news_data():
 
     # --------------------------------------------------------
     # 最终排序
-    #
-    # 第一排序：
-    #     总分
-    #
-    # 第二排序：
-    #     发布时间
-    #
-    # 高分优先
-    # 同分情况下最新优先
     # --------------------------------------------------------
 
     final_news.sort(
+
         key=lambda x: (
+
             x.get(
                 "score",
                 0
@@ -881,18 +593,17 @@ def get_news_data():
 
             x.get(
                 "published_at"
-            ) or datetime.min.replace(
+            )
+            or datetime.min.replace(
                 tzinfo=timezone.utc
             )
 
         ),
+
         reverse=True
+
     )
 
-
-    # --------------------------------------------------------
-    # 输出统计
-    # --------------------------------------------------------
 
     print(
         "\n============================================================"
@@ -952,7 +663,8 @@ if __name__ == "__main__":
 
             print(
                 f"核心事实："
-                f"{article.get('summary', '')}"
+                f"{article.get('core_fact') "
+                or article.get('summary', '')}"
             )
 
             print(
@@ -963,6 +675,11 @@ if __name__ == "__main__":
             print(
                 f"时间："
                 f"{article.get('published', '时间缺失')}"
+            )
+
+            print(
+                f"事件类型："
+                f"{article.get('event_type', '未知')}"
             )
 
             print(
