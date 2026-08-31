@@ -43,5 +43,7 @@ jobs:
         run: |
           python src/market_data.py
       - name: Run news data
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           python src/news_data.py
