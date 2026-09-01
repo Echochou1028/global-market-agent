@@ -8,24 +8,58 @@ from datetime import datetime
 #
 # 职责：
 #
-# 1. 接收 AI 新闻分析结果
+# 1. 接收 Groq AI 新闻分析结果
 # 2. 执行确定性的评分规则
 # 3. 执行同一事件合并
 # 4. 执行最终新闻展示规则
+# 5. 执行最终排序
 #
-# 非职责：
+# 本文件不负责：
 #
 # ❌ 不使用关键词判断新闻是否重要
 # ❌ 不使用关键词判断新闻分类
 # ❌ 不使用关键词判断影响范围
 # ❌ 不使用关键词判断影响程度
-# ❌ 不让来源决定新闻影响力
+# ❌ 不让来源决定新闻影响范围
+# ❌ 不让来源决定新闻影响程度
+# ❌ 不进行AI分析
+# ❌ 不进行时效性评分
+#
+# ============================================================
 #
 # AI负责：
-#   新闻理解 / 事件识别 / 分类 / 市场影响判断
+#
+# 新闻理解
+# 事件识别
+# 分类
+# 金融市场相关性
+# 影响范围等级
+# 影响程度等级
+# 同一事件ID
 #
 # 本文件负责：
-#   硬规则评分 / 去重 / 筛选 / 排序
+#
+# 影响范围硬规则评分
+# 影响程度硬规则评分
+# 来源可信度硬规则评分
+# 同一事件合并
+# 新闻筛选
+# 新闻排序
+#
+# ============================================================
+#
+# 最终评分：
+#
+# 影响范围     40分
+# 影响程度     40分
+# 来源可信度   20分
+# ----------------
+# 总分         100分
+#
+# 注意：
+#
+# ❌ 已取消“时效性”评分
+#
 # ============================================================
 
 
@@ -37,11 +71,11 @@ CATEGORIES = [
 
     "宏观经济与央行政策",
     "全球股市",
+    "AI与半导体",
     "能源与大宗商品",
     "外汇与债券",
-    "AI与半导体",
-    "公司重大事件",
     "地缘政治与制裁",
+    "公司重大事件",
     "其他市场事件",
 
 ]
@@ -52,8 +86,11 @@ CATEGORIES = [
 #
 # 来源只影响20分。
 #
-# 不允许因为来源权威，
-# 自动提高影响范围或影响程度。
+# 来源不能改变：
+#
+# - 影响范围
+# - 影响程度
+#
 # ============================================================
 
 SOURCE_CREDIBILITY = {
@@ -106,54 +143,64 @@ SOURCE_CREDIBILITY = {
 
 
 # ============================================================
-# AI影响范围 → 固定分值
+# 影响范围 → 固定分值
 #
-# AI只负责理解事件影响范围。
-#
-# 最终分值由代码固定执行。
+# AI负责判断等级。
+# Python负责转换成固定分值。
 # ============================================================
 
 IMPACT_SCOPE_SCORES = {
 
     "global": 40,
+
     "multi_region": 32,
+
     "regional": 24,
+
     "country": 16,
+
     "industry": 8,
+
     "company": 8,
+
     "limited": 4,
 
 }
 
 
 # ============================================================
-# AI影响程度 → 固定分值
+# 影响程度 → 固定分值
 #
-# AI只负责判断事件严重程度。
-#
-# 最终分值由代码固定执行。
+# AI负责判断等级。
+# Python负责转换成固定分值。
 # ============================================================
 
 IMPACT_DEGREE_SCORES = {
 
     "very_high": 40,
+
     "high": 30,
+
     "medium": 20,
+
     "low": 10,
 
 }
 
 
 # ============================================================
-# 标准化文本
+# 文本标准化
 # ============================================================
 
 def normalize_text(text):
 
     if not text:
+
         return ""
 
-    return str(text).strip()
+    return str(
+        text
+    ).strip()
 
 
 # ============================================================
@@ -163,17 +210,32 @@ def normalize_text(text):
 def get_source_credibility(source):
 
     if not source:
+
         return 0
 
-    source = str(source).strip()
 
+    source = str(
+        source
+    ).strip()
+
+
+    # --------------------------------------------------------
     # 精确匹配
+    # --------------------------------------------------------
+
     if source in SOURCE_CREDIBILITY:
 
-        return SOURCE_CREDIBILITY[source]
+        return SOURCE_CREDIBILITY[
+            source
+        ]
 
+
+    # --------------------------------------------------------
     # 模糊匹配
+    # --------------------------------------------------------
+
     source_lower = source.lower()
+
 
     for name, score in SOURCE_CREDIBILITY.items():
 
@@ -181,20 +243,25 @@ def get_source_credibility(source):
 
             return score
 
+
+    # --------------------------------------------------------
     # 未知来源
     #
     # 不猜测。
-    # 不给予默认高分。
+    # 不给默认高分。
+    # --------------------------------------------------------
 
     return 0
 
 
 # ============================================================
 # 标准化影响范围
-# ============================================================
 #
-# AI返回值可能存在大小写或轻微格式差异。
-# 这里只负责映射，不负责重新判断新闻。
+# 注意：
+#
+# 这里只做格式兼容。
+#
+# 不重新判断新闻影响范围。
 # ============================================================
 
 def normalize_impact_scope(value):
@@ -203,34 +270,70 @@ def normalize_impact_scope(value):
 
         return "limited"
 
-    value = str(value).strip().lower()
+
+    value = str(
+        value
+    ).strip().lower()
+
 
     aliases = {
 
-        "global": "global",
-        "worldwide": "global",
-        "global_market": "global",
+        "global":
+            "global",
 
-        "multi_region": "multi_region",
-        "multi-regional": "multi_region",
-        "multiple_regions": "multi_region",
+        "worldwide":
+            "global",
 
-        "regional": "regional",
+        "global_market":
+            "global",
 
-        "country": "country",
-        "national": "country",
-        "single_country": "country",
 
-        "industry": "industry",
-        "sector": "industry",
+        "multi_region":
+            "multi_region",
 
-        "company": "company",
-        "single_company": "company",
+        "multi-regional":
+            "multi_region",
 
-        "limited": "limited",
-        "local": "limited",
+        "multiple_regions":
+            "multi_region",
+
+
+        "regional":
+            "regional",
+
+
+        "country":
+            "country",
+
+        "national":
+            "country",
+
+        "single_country":
+            "country",
+
+
+        "industry":
+            "industry",
+
+        "sector":
+            "industry",
+
+
+        "company":
+            "company",
+
+        "single_company":
+            "company",
+
+
+        "limited":
+            "limited",
+
+        "local":
+            "limited",
 
     }
+
 
     return aliases.get(
         value,
@@ -248,25 +351,49 @@ def normalize_impact_degree(value):
 
         return "low"
 
-    value = str(value).strip().lower()
+
+    value = str(
+        value
+    ).strip().lower()
+
 
     aliases = {
 
-        "very_high": "very_high",
-        "very-high": "very_high",
-        "critical": "very_high",
-        "extreme": "very_high",
+        "very_high":
+            "very_high",
 
-        "high": "high",
-        "major": "high",
+        "very-high":
+            "very_high",
 
-        "medium": "medium",
-        "moderate": "medium",
+        "critical":
+            "very_high",
 
-        "low": "low",
-        "minor": "low",
+        "extreme":
+            "very_high",
+
+
+        "high":
+            "high",
+
+        "major":
+            "high",
+
+
+        "medium":
+            "medium",
+
+        "moderate":
+            "medium",
+
+
+        "low":
+            "low",
+
+        "minor":
+            "low",
 
     }
+
 
     return aliases.get(
         value,
@@ -281,14 +408,20 @@ def normalize_impact_degree(value):
 def score_impact_scope(article):
 
     ai_scope = normalize_impact_scope(
+
         article.get(
             "impact_scope_level"
         )
+
     )
 
+
     return IMPACT_SCOPE_SCORES.get(
+
         ai_scope,
+
         4
+
     )
 
 
@@ -299,29 +432,37 @@ def score_impact_scope(article):
 def score_impact_degree(article):
 
     ai_degree = normalize_impact_degree(
+
         article.get(
             "impact_degree_level"
         )
+
     )
 
+
     return IMPACT_DEGREE_SCORES.get(
+
         ai_degree,
+
         10
+
     )
 
 
 # ============================================================
 # 最终评分
 #
-# 固定公式：
+# 公式：
 #
-# 影响范围 40
+# 影响范围     40
 # +
-# 影响程度 40
+# 影响程度     40
 # +
-# 来源可信度 20
+# 来源可信度   20
+# =
+# 总分         100
 #
-# = 总分100
+# ❌ 无时效性评分
 # ============================================================
 
 def calculate_score(article):
@@ -330,49 +471,91 @@ def calculate_score(article):
         article
     )
 
+
     impact_degree = score_impact_degree(
         article
     )
 
+
     source_credibility = get_source_credibility(
+
         article.get(
             "source",
             ""
         )
+
     )
 
+
+    # --------------------------------------------------------
     # 强制边界
+    # --------------------------------------------------------
 
     impact_scope = min(
-        max(impact_scope, 0),
+        max(
+            impact_scope,
+            0
+        ),
         40
     )
+
 
     impact_degree = min(
-        max(impact_degree, 0),
+        max(
+            impact_degree,
+            0
+        ),
         40
     )
 
+
     source_credibility = min(
-        max(source_credibility, 0),
+        max(
+            source_credibility,
+            0
+        ),
         20
     )
 
+
+    # --------------------------------------------------------
+    # 总分
+    # --------------------------------------------------------
+
     total_score = (
+
         impact_scope
+
         + impact_degree
+
         + source_credibility
+
     )
 
-    article["impact_scope"] = impact_scope
 
-    article["impact_degree"] = impact_degree
+    # --------------------------------------------------------
+    # 写回结果
+    # --------------------------------------------------------
+
+    article["impact_scope"] = (
+        impact_scope
+    )
+
+
+    article["impact_degree"] = (
+        impact_degree
+    )
+
 
     article["source_credibility"] = (
         source_credibility
     )
 
-    article["score"] = total_score
+
+    article["score"] = (
+        total_score
+    )
+
 
     return article
 
@@ -383,33 +566,45 @@ def calculate_score(article):
 
 def prepare_article(article):
 
-    article = dict(article)
+    article = dict(
+        article
+    )
+
 
     article.setdefault(
         "category",
         "其他市场事件"
     )
 
+
     article.setdefault(
         "event_id",
         None
     )
+
 
     article.setdefault(
         "market_relevant",
         False
     )
 
+
     article.setdefault(
         "score",
         0
     )
+
 
     return article
 
 
 # ============================================================
 # AI事件ID标准化
+#
+# Groq最终版使用：
+#
+# event_id
+#
 # ============================================================
 
 def get_event_id(article):
@@ -418,28 +613,39 @@ def get_event_id(article):
         "event_id"
     )
 
+
     if event_id:
 
         return str(
             event_id
         ).strip().lower()
 
-    # AI没有提供event_id时，
-    # 不主动猜测。
+
+    # --------------------------------------------------------
+    # AI没有提供event_id：
+    #
+    # 不主动猜测事件。
     #
     # 使用标题作为保守唯一标识，
-    # 避免错误合并不同事件。
+    # 防止错误合并不同新闻。
+    # --------------------------------------------------------
 
     title = normalize_text(
+
         article.get(
             "title",
             ""
         )
+
     ).lower()
+
 
     if title:
 
-        return f"title:{title}"
+        return (
+            f"title:{title}"
+        )
+
 
     return None
 
@@ -447,17 +653,21 @@ def get_event_id(article):
 # ============================================================
 # 同一事件合并
 #
-# 重要：
+# 规则：
 #
-# 同一事件是否相同，
-# 由AI分析层产生 event_id。
+# 同一个 event_id
+# →
+# 视为同一事件
 #
-# 本文件不再通过关键词猜测。
+# 不使用关键词进行事件判断。
 # ============================================================
 
 def merge_same_events(articles):
 
-    groups = defaultdict(list)
+    groups = defaultdict(
+        list
+    )
+
 
     for article in articles:
 
@@ -465,12 +675,14 @@ def merge_same_events(articles):
             article
         )
 
+
         if event_id is None:
 
             event_id = (
                 f"article:"
                 f"{id(article)}"
             )
+
 
         groups[
             event_id
@@ -486,22 +698,30 @@ def merge_same_events(articles):
 
         # ----------------------------------------------------
         # 主新闻：
-        # 优先选择评分最高的新闻。
-        # 分数相同则选择最新新闻。
+        #
+        # 优先评分最高
+        # 分数相同则选择最新
         # ----------------------------------------------------
 
         items.sort(
+
             key=lambda x: (
+
                 x.get(
                     "score",
                     0
                 ),
+
                 x.get(
                     "published_at"
                 ) or datetime.min
+
             ),
+
             reverse=True
+
         )
+
 
         primary = dict(
             items[0]
@@ -509,7 +729,7 @@ def merge_same_events(articles):
 
 
         # ----------------------------------------------------
-        # 保留多个真实来源
+        # 保留真实来源
         # ----------------------------------------------------
 
         sources = []
@@ -527,11 +747,13 @@ def merge_same_events(articles):
                 "url"
             )
 
+
             if source and source not in sources:
 
                 sources.append(
                     source
                 )
+
 
             if url and url not in urls:
 
@@ -540,15 +762,24 @@ def merge_same_events(articles):
                 )
 
 
-        primary["sources"] = sources
-
-        primary["urls"] = urls
-
-        primary["merged_count"] = len(
-            items
+        primary["sources"] = (
+            sources
         )
 
-        primary["event_id"] = event_id
+
+        primary["urls"] = (
+            urls
+        )
+
+
+        primary["merged_count"] = (
+            len(items)
+        )
+
+
+        primary["event_id"] = (
+            event_id
+        )
 
 
         merged.append(
@@ -567,22 +798,30 @@ def merge_same_events(articles):
 # 每个分类最多10条。
 #
 # 注意：
-# 这里不存在“总TOP10”。
+#
+# ❌ 没有总TOP10
+# ❌ 不强行补足10条
 # ============================================================
 
 def select_low_score_news(
     articles
 ):
 
-    category_groups = defaultdict(list)
+    category_groups = defaultdict(
+        list
+    )
 
 
     for article in articles:
 
         category = article.get(
+
             "category",
+
             "其他市场事件"
+
         )
+
 
         category_groups[
             category
@@ -597,17 +836,24 @@ def select_low_score_news(
     for category, items in category_groups.items():
 
         items.sort(
+
             key=lambda x: (
+
                 x.get(
                     "score",
                     0
                 ),
+
                 x.get(
                     "published_at"
                 ) or datetime.min
+
             ),
+
             reverse=True
+
         )
+
 
         selected.extend(
             items[:10]
@@ -619,43 +865,64 @@ def select_low_score_news(
 
 # ============================================================
 # 最终排序
+#
+# 第一优先级：
+# 总分
+#
+# 第二优先级：
+# 发布时间
 # ============================================================
 
 def sort_news(articles):
 
     return sorted(
+
         articles,
+
         key=lambda x: (
+
             x.get(
                 "score",
                 0
             ),
+
             x.get(
                 "published_at"
             ) or datetime.min
+
         ),
+
         reverse=True
+
     )
 
 
 # ============================================================
 # 主筛选函数
 #
-# 流程：
+# 完整流程：
 #
-# AI分析结果
+# Groq AI分析
 #      ↓
 # 过滤非市场新闻
 #      ↓
-# 计算硬规则评分
+# 检查来源
+#      ↓
+# 检查原文链接
+#      ↓
+# 检查发布时间
+#      ↓
+# 本地硬规则评分
 #      ↓
 # 同一事件合并
 #      ↓
-# >40全部保留
+# >40分全部保留
 #      ↓
-# <=40分类Top10
+# <=40分各分类最多10条
 #      ↓
 # 最终排序
+#      ↓
+# 按分类返回
 # ============================================================
 
 def select_news(
@@ -671,13 +938,24 @@ def select_news(
     )
 
     print(
+        "评分公式："
+        "影响范围40 + "
+        "影响程度40 + "
+        "来源可信度20"
+    )
+
+    print(
+        "注意：已取消时效性评分"
+    )
+
+    print(
         "============================================================"
     )
 
 
     # ========================================================
     # 第一步
-    # 接收AI分析结果
+    # 接收 Groq AI 分析结果
     # ========================================================
 
     market_candidates = []
@@ -724,9 +1002,23 @@ def select_news(
 
 
         # ----------------------------------------------------
+        # AI分析失败的新闻
+        #
+        # 不允许进入最终新闻池。
+        # ----------------------------------------------------
+
+        if article.get(
+            "ai_analysis_failed",
+            False
+        ):
+
+            continue
+
+
+        # ----------------------------------------------------
         # AI判断：
         #
-        # 是否真正影响金融市场
+        # 是否具有金融市场影响
         # ----------------------------------------------------
 
         if not article.get(
@@ -740,22 +1032,28 @@ def select_news(
         # ----------------------------------------------------
         # AI判断：
         #
-        # 事件本身是什么
+        # 事件分类
         # ----------------------------------------------------
 
         category = article.get(
             "category"
         )
 
+
         if category not in CATEGORIES:
 
-            category = "其他市场事件"
+            category = (
+                "其他市场事件"
+            )
 
-        article["category"] = category
+
+        article["category"] = (
+            category
+        )
 
 
         # ----------------------------------------------------
-        # 执行硬规则评分
+        # 执行本地硬规则评分
         # ----------------------------------------------------
 
         article = calculate_score(
@@ -813,7 +1111,7 @@ def select_news(
     # 第四步
     # <=40分
     #
-    # 各分类Top10
+    # 每个分类最多10条
     # ========================================================
 
     low_score_news = [
@@ -831,9 +1129,13 @@ def select_news(
 
 
     low_score_selected = (
+
         select_low_score_news(
+
             low_score_news
+
         )
+
     )
 
 
@@ -841,6 +1143,7 @@ def select_news(
         f"高权重新闻（>40）："
         f"{len(high_score_news)}"
     )
+
 
     print(
         f"低权重新闻（<=40）："
@@ -850,14 +1153,21 @@ def select_news(
 
     # ========================================================
     # 第五步
-    # 最终结果
+    # 最终新闻池
     # ========================================================
 
     final_news = (
+
         high_score_news
+
         + low_score_selected
+
     )
 
+
+    # --------------------------------------------------------
+    # 最终排序
+    # --------------------------------------------------------
 
     final_news = sort_news(
         final_news
@@ -869,6 +1179,7 @@ def select_news(
         f"{len(final_news)}"
     )
 
+
     print(
         "============================================================"
     )
@@ -878,15 +1189,21 @@ def select_news(
     # 按分类返回
     # ========================================================
 
-    result = defaultdict(list)
+    result = defaultdict(
+        list
+    )
 
 
     for article in final_news:
 
         category = article.get(
+
             "category",
+
             "其他市场事件"
+
         )
+
 
         result[
             category
@@ -895,7 +1212,9 @@ def select_news(
         )
 
 
-    return dict(result)
+    return dict(
+        result
+    )
 
 
 # ============================================================
@@ -916,21 +1235,32 @@ def score_single_article(
         False
     ):
 
-        article["market_relevant"] = False
+        article[
+            "market_relevant"
+        ] = False
 
         return article
 
 
     category = article.get(
+
         "category",
+
         "其他市场事件"
+
     )
+
 
     if category not in CATEGORIES:
 
-        category = "其他市场事件"
+        category = (
+            "其他市场事件"
+        )
 
-    article["category"] = category
+
+    article["category"] = (
+        category
+    )
 
 
     return calculate_score(
