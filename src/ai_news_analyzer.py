@@ -33,11 +33,11 @@ from openai import OpenAI
 # 批量控制
 #
 # 最多50条/批
-# Token安全阈值6500
+# Token安全阈值6000
 #
 # 注意：
 #
-# 6500不是简单的输入Token上限。
+# 6000不是简单的输入Token上限。
 # 批次生成时同时考虑：
 #
 # 1. 输入Token估算
@@ -61,7 +61,7 @@ GROQ_MODEL = "openai/gpt-oss-120b"
 
 MAX_ARTICLES_PER_BATCH = 50
 
-TOKEN_SAFETY_LIMIT = 6500
+TOKEN_SAFETY_LIMIT = 6000
 
 # 每条新闻为模型输出预留的Token预算。
 #
@@ -614,7 +614,7 @@ def estimate_batch_tokens(
 # 规则：
 #
 # 1. 单批最多50条
-# 2. 预计总Token不得超过6500
+# 2. 预计总Token不得超过6000
 # 3. Token达到安全阈值时提前切批
 #
 # 注意：
@@ -1097,7 +1097,9 @@ def request_groq_batch(
                 ],
 
                 temperature=0,
-
+                
+                reasoning_effort="low",
+                
                 # ------------------------------------------------
                 # JSON Object Mode
                 # ------------------------------------------------
