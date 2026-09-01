@@ -1,11 +1,11 @@
 import json
 import os
 
-from google import genai
+from openai import OpenAI
 
 
 # ============================================================
-# Google Gemini AI 新闻分析层
+# Groq AI 新闻分析层
 #
 # 本文件职责：
 #
@@ -23,32 +23,47 @@ from google import genai
 # 4. 来源可信度评分
 #
 # 上述硬规则由 news_scoring.py 执行。
+#
+# 核心架构：
+#
+# 新闻
+# ↓
+# 本地预处理
+# ↓
+# Groq 一次批量分析
+# ↓
+# 结构化 JSON
+# ↓
+# 本地去重 / 评分 / 排序
+# ↓
+# 最终日报
 # ============================================================
 
 
 # ============================================================
-# Gemini 模型
+# Groq 模型
 # ============================================================
 
-GEMINI_MODEL = "gemini-3.6-flash"
+GROQ_MODEL = "openai/gpt-oss-120b"
 
 
 # ============================================================
-# 初始化 Gemini
+# 初始化 Groq
 # ============================================================
 
 def get_client():
 
-    api_key = os.getenv("GEMINI_API_KEY")
+    api_key = os.getenv("GROQ_API_KEY")
 
     if not api_key:
 
         raise RuntimeError(
-            "GEMINI_API_KEY 未配置"
+            "GROQ_API_KEY 未配置"
         )
 
-    return genai.Client(
-        api_key=api_key
+    return OpenAI(
+        api_key=api_key,
+        base_url="https://api.groq.com/openai/v1"
     )
 
 
@@ -171,57 +186,141 @@ Fed加息决定
 不要进行最终分数计算。
 
 最终评分由程序执行。
+
+六、输出原则
+
+你将一次性分析多条新闻。
+
+必须按照输入新闻的 id 返回对应分析结果。
+
+必须返回合法 JSON。
+
+禁止输出 Markdown。
+
+禁止输出解释文字。
+
+禁止输出 ```json。
+
+只允许返回 JSON 数组。
 """
 
 
 # ============================================================
-# 单条新闻分析
+# 新闻预处理
 # ============================================================
 
-def analyze_news(article):
+def prepare_articles(articles):
+
+    prepared = []
+
+    for index, article in enumerate(
+        articles,
+        1
+    ):
+
+        prepared.append({
+
+            "id": index,
+
+            "title":
+                article.get(
+                    "title",
+                    ""
+                ),
+
+            "summary":
+                article.get(
+                    "summary",
+                    ""
+                ),
+
+            "source":
+                article.get(
+                    "source",
+                    ""
+                ),
+
+            "url":
+                article.get(
+                    "url",
+                    ""
+                )
+        })
+
+    return prepared
+
+
+# ============================================================
+# 批量分析
+# ============================================================
+
+def analyze_news_list(
+    articles
+):
+
+    if not articles:
+
+        return []
+
 
     client = get_client()
 
-    title = article.get(
-        "title",
-        ""
+
+    prepared_articles = prepare_articles(
+        articles
     )
 
-    summary = article.get(
-        "summary",
-        ""
+
+    print(
+        "\n============================================================"
     )
 
-    source = article.get(
-        "source",
-        ""
+    print(
+        "开始使用 Groq AI 批量分析新闻事件"
     )
 
-    url = article.get(
-        "url",
-        ""
+    print(
+        f"待分析新闻：{len(articles)} 条"
     )
+
+    print(
+        "分析模式：全量批量分析"
+    )
+
+    print(
+        "============================================================"
+    )
+
+
+    # --------------------------------------------------------
+    # 将所有新闻一次性组成一个 JSON 输入
+    # --------------------------------------------------------
+
+    articles_json = json.dumps(
+        prepared_articles,
+        ensure_ascii=False
+    )
+
 
     prompt = f"""
-请分析下面这条真实新闻。
+请一次性分析下面全部新闻。
 
-标题：
-{title}
+输入新闻数量：
+{len(prepared_articles)}
 
-新闻摘要：
-{summary}
+新闻数据：
 
-来源：
-{source}
+{articles_json}
 
-原文链接：
-{url}
 
-请严格返回 JSON。
+请对每一条新闻进行分析。
 
-JSON 格式：
+必须返回一个 JSON 数组。
+
+每一个数组元素必须包含：
 
 {{
+    "id": 1,
     "market_relevant": true,
     "event_type": "事件本身是什么",
     "category": "分类",
@@ -230,11 +329,23 @@ JSON 格式：
     "event_key": "用于判断同一事件的简短事件标识"
 }}
 
-要求：
 
-1. market_relevant 必须是 true 或 false。
-2. 如果没有明确金融市场影响，market_relevant 必须为 false。
-3. category 必须从以下分类中选择：
+严格要求：
+
+1. id 必须与输入新闻的 id 完全一致。
+
+2. 每一条输入新闻都必须返回一个分析结果。
+
+3. 不允许遗漏任何 id。
+
+4. 不允许增加输入中不存在的 id。
+
+5. market_relevant 必须是 true 或 false。
+
+6. 如果没有明确金融市场影响，
+   market_relevant 必须为 false。
+
+7. category 必须从以下分类中选择：
 
 宏观经济与央行政策
 全球股市
@@ -245,27 +356,87 @@ AI与半导体
 公司重大事件
 其他市场事件
 
-4. category 必须依据事件本身决定，而不是关键词。
-5. core_fact 不允许编造新闻中没有出现的事实。
-6. event_key 用于识别同一事件。
-7. 不要评分。
-8. 不要输出 Markdown。
-9. 只返回合法 JSON。
+8. category 必须依据事件本身决定，
+   不能依据关键词机械分类。
+
+9. core_fact 只能使用输入新闻中的事实。
+
+10. 不允许补充新闻中没有出现的信息。
+
+11. event_key 用于识别同一事件。
+
+12. 不要进行任何评分。
+
+13. 不要输出 Markdown。
+
+14. 不要输出 ```json。
+
+15. 只返回合法 JSON 数组。
 """
 
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=[
-            SYSTEM_PROMPT,
-            prompt
-        ]
-    )
 
-    text = response.text.strip()
+    # ========================================================
+    # 调用 Groq
+    # ========================================================
 
-    # --------------------------------------------------------
-    # 清理可能出现的 Markdown JSON
-    # --------------------------------------------------------
+    try:
+
+        response = client.chat.completions.create(
+
+            model=GROQ_MODEL,
+
+            messages=[
+                {
+                    "role": "system",
+                    "content": SYSTEM_PROMPT
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+
+            temperature=0,
+
+            response_format={
+                "type": "json_object"
+            }
+        )
+
+
+    except Exception as e:
+
+        print(
+            f"\nGroq AI 批量分析失败：{e}"
+        )
+
+        # ----------------------------------------------------
+        # AI失败时绝不猜测
+        # ----------------------------------------------------
+
+        for article in articles:
+
+            article[
+                "market_relevant"
+            ] = False
+
+            article[
+                "ai_analysis_failed"
+            ] = True
+
+        return articles
+
+
+    # ========================================================
+    # 获取 AI 返回结果
+    # ========================================================
+
+    text = response.choices[0].message.content.strip()
+
+
+    # ========================================================
+    # 清理 Markdown
+    # ========================================================
 
     if text.startswith("```"):
 
@@ -281,6 +452,11 @@ AI与半导体
 
         text = text.strip()
 
+
+    # ========================================================
+    # 解析 JSON
+    # ========================================================
+
     try:
 
         result = json.loads(
@@ -289,107 +465,291 @@ AI与半导体
 
     except json.JSONDecodeError:
 
-        raise ValueError(
-            f"Gemini 返回的不是合法 JSON：{text}"
+        print(
+            "\nGroq 返回结果不是合法 JSON："
         )
 
-    return result
+        print(text)
+
+        for article in articles:
+
+            article[
+                "market_relevant"
+            ] = False
+
+            article[
+                "ai_analysis_failed"
+            ] = True
+
+        return articles
 
 
-# ============================================================
-# 批量分析新闻
-# ============================================================
+    # ========================================================
+    # 兼容 JSON object
+    #
+    # 因为 response_format=json_object
+    # 要求模型返回 object。
+    #
+    # 因此允许以下形式：
+    #
+    # {
+    #     "results": [...]
+    # }
+    #
+    # 或：
+    #
+    # {
+    #     "articles": [...]
+    # }
+    # ========================================================
 
-def analyze_news_list(
-    articles
-):
+    if isinstance(
+        result,
+        dict
+    ):
+
+        if isinstance(
+            result.get("results"),
+            list
+        ):
+
+            result = result["results"]
+
+        elif isinstance(
+            result.get("articles"),
+            list
+        ):
+
+            result = result["articles"]
+
+        else:
+
+            print(
+                "\nGroq 返回 JSON object，但没有找到 results/articles 数组。"
+            )
+
+            for article in articles:
+
+                article[
+                    "market_relevant"
+                ] = False
+
+                article[
+                    "ai_analysis_failed"
+                ] = True
+
+            return articles
+
+
+    if not isinstance(
+        result,
+        list
+    ):
+
+        print(
+            "\nGroq 返回的数据结构不是 JSON 数组。"
+        )
+
+        for article in articles:
+
+            article[
+                "market_relevant"
+            ] = False
+
+            article[
+                "ai_analysis_failed"
+            ] = True
+
+        return articles
+
+
+    # ========================================================
+    # 建立 AI 分析结果索引
+    # ========================================================
+
+    result_map = {}
+
+    for item in result:
+
+        if not isinstance(
+            item,
+            dict
+        ):
+
+            continue
+
+        item_id = item.get(
+            "id"
+        )
+
+        if item_id is None:
+
+            continue
+
+        result_map[
+            str(item_id)
+        ] = item
+
+
+    # ========================================================
+    # 将 AI 结果重新写回原始新闻
+    # ========================================================
 
     analyzed = []
 
-    print(
-        "\n============================================================"
-    )
-
-    print(
-        "开始使用 Gemini AI 分析新闻事件"
-    )
-
-    print(
-        f"待分析新闻：{len(articles)} 条"
-    )
-
-    print(
-        "============================================================"
-    )
 
     for index, article in enumerate(
         articles,
         1
     ):
 
-        try:
+        ai_result = result_map.get(
+            str(index)
+        )
 
-            result = analyze_news(
-                article
-            )
 
-            article.update(
-                result
-            )
-
-            analyzed.append(
-                article
-            )
+        if not ai_result:
 
             print(
                 f"[{index}/{len(articles)}] "
+                f"AI分析结果缺失："
                 f"{article.get('title', '')}"
             )
 
-            print(
-                f"  金融市场相关："
-                f"{result.get('market_relevant')}"
-            )
+            article[
+                "market_relevant"
+            ] = False
 
-            print(
-                f"  分类："
-                f"{result.get('category')}"
-            )
-
-            print(
-                f"  事件："
-                f"{result.get('event_type')}"
-            )
-
-        except Exception as e:
-
-            print(
-                f"[{index}/{len(articles)}] "
-                f"AI分析失败：{e}"
-            )
-
-            # AI 分析失败时，
-            # 绝不猜测，不编造
-            article["market_relevant"] = False
-            article["ai_analysis_failed"] = True
+            article[
+                "ai_analysis_failed"
+            ] = True
 
             analyzed.append(
                 article
             )
+
+            continue
+
+
+        # ----------------------------------------------------
+        # 写入分析结果
+        # ----------------------------------------------------
+
+        article.update({
+
+            "market_relevant":
+                ai_result.get(
+                    "market_relevant",
+                    False
+                ),
+
+            "event_type":
+                ai_result.get(
+                    "event_type",
+                    ""
+                ),
+
+            "category":
+                ai_result.get(
+                    "category",
+                    ""
+                ),
+
+            "core_fact":
+                ai_result.get(
+                    "core_fact",
+                    ""
+                ),
+
+            "market_impact_reason":
+                ai_result.get(
+                    "market_impact_reason",
+                    ""
+                ),
+
+            "event_key":
+                ai_result.get(
+                    "event_key",
+                    ""
+                )
+        })
+
+
+        article[
+            "ai_analysis_failed"
+        ] = False
+
+
+        analyzed.append(
+            article
+        )
+
+
+        print(
+            f"[{index}/{len(articles)}] "
+            f"{article.get('title', '')}"
+        )
+
+        print(
+            f"  金融市场相关："
+            f"{article.get('market_relevant')}"
+        )
+
+        print(
+            f"  分类："
+            f"{article.get('category')}"
+        )
+
+        print(
+            f"  事件："
+            f"{article.get('event_type')}"
+        )
+
+
+    # ========================================================
+    # 完成
+    # ========================================================
 
     print(
         "\n============================================================"
     )
 
     print(
-        f"AI 新闻分析完成：{len(analyzed)} 条"
+        f"Groq 批量新闻分析完成：{len(analyzed)} 条"
+    )
+
+    print(
+        "AI调用方式：全量批量分析"
     )
 
     print(
         "============================================================"
     )
 
+
     return analyzed
+
+
+# ============================================================
+# 单条测试
+# ============================================================
+
+def analyze_news(
+    article
+):
+
+    results = analyze_news_list(
+        [article]
+    )
+
+    if results:
+
+        return results[0]
+
+    return {
+        "market_relevant": False,
+        "ai_analysis_failed": True
+    }
 
 
 # ============================================================
@@ -414,9 +774,11 @@ if __name__ == "__main__":
 
     }
 
+
     result = analyze_news(
         test_article
     )
+
 
     print(
         json.dumps(
