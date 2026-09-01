@@ -4,3 +4,4 @@ yfinance
 feedparser
 python-dotenv
 openai
+groq
