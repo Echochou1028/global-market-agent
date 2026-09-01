@@ -9,26 +9,25 @@ from openai import OpenAI
 # 全球金融市场日报
 # ai_news_analyzer.py
 #
-# 最终版
+# 最终稳定版
 #
-# 核心职责：
+# 核心设计：
 #
-# 1. 使用 Groq AI 理解新闻事件
-# 2. 判断是否具有实际金融市场影响
-# 3. 判断事件本身是什么
-# 4. 确定新闻分类
-# 5. 判断同一事件关系
-# 6. 提取核心事实
-# 7. 判断影响范围
-# 8. 判断影响程度
-#
-# 本文件不负责：
-#
-# ❌ 最终评分
-# ❌ 来源可信度评分
-# ❌ 时效性评分
-# ❌ TOP10
-# ❌ 最终排序
+# 1. GPT-OSS 120B
+# 2. reasoning_effort = low
+# 3. JSON Object Mode
+# 4. 最多50条/批
+# 5. Token安全控制
+# 6. 动态max_completion_tokens
+# 7. 保守Token估算
+# 8. finish_reason检查
+# 9. JSON结构兼容
+# 10. ID完整性验证
+# 11. 批次失败自动重试
+# 12. 批次不完整自动拆分
+# 13. 所有批次成功后才合并
+# 14. 任意最终批次失败 -> 整体失败
+# 15. 不使用残缺结果
 #
 # ============================================================
 
@@ -41,63 +40,94 @@ GROQ_MODEL = "openai/gpt-oss-120b"
 
 
 # ============================================================
-# 批量控制
+# 批次控制
 # ============================================================
 
-# 单批最多50条。
+# 绝对数量上限
 MAX_ARTICLES_PER_BATCH = 50
 
+# ------------------------------------------------------------
+# 真正用于自动切批的安全Token目标
+#
+# 注意：
+#
+# 这不是Groq官方TPM。
+# Groq当前环境可能是8000 TPM。
+#
+# 我们主动留出安全空间。
+# ------------------------------------------------------------
 
-# ============================================================
-# Token安全控制
-#
-# Groq当前实际错误信息显示：
-#
-# TPM Limit = 8000
-#
-# 因此这里不把请求推到8000边缘，
-# 留出一定安全空间。
-# ============================================================
-
-TOKEN_SAFETY_LIMIT = 7600
-
-
-# ============================================================
-# 输出Token控制
-#
-# GPT-OSS除了最终JSON之外，
-# completion token还可能包含内部reasoning。
-#
-# 因此不能再使用：
-#
-# OUTPUT_TOKENS_PER_ARTICLE = 90
-#
-# 作为max_completion_tokens。
-#
-# 这里使用：
-#
-# 1. 动态计算
-# 2. 最小输出预算
-# 3. 最大输出预算
-#
-# 最终max_completion_tokens由本批新闻数量
-# 和输入Token动态决定。
-# ============================================================
-
-OUTPUT_TOKENS_PER_ARTICLE = 140
-
-MIN_COMPLETION_TOKENS = 1800
-
-MAX_COMPLETION_TOKENS = 3800
+TOKEN_SAFETY_LIMIT = 6500
 
 
-# ============================================================
-# 重试
-# ============================================================
+# ------------------------------------------------------------
+# 最小批次
+#
+# 如果一个批次失败，会不断拆分。
+#
+# 最小不会低于1条。
+# ------------------------------------------------------------
+
+MIN_ARTICLES_PER_BATCH = 1
+
+
+# ------------------------------------------------------------
+# 输出Token估算
+#
+# 每条新闻需要：
+#
+# market_relevant
+# event_type
+# category
+# core_fact
+# market_impact_reason
+# event_id
+# impact_scope_level
+# impact_degree_level
+#
+# 这里不是最终max_completion_tokens。
+# 只是用于批次规划。
+# ------------------------------------------------------------
+
+OUTPUT_TOKENS_PER_ARTICLE = 110
+
+MIN_OUTPUT_TOKENS = 700
+
+MAX_OUTPUT_TOKENS = 2200
+
+
+# ------------------------------------------------------------
+# Groq请求最大重试次数
+# ------------------------------------------------------------
 
 MAX_RETRIES = 3
 
 RETRY_DELAY_SECONDS = 2
+
+
+# ------------------------------------------------------------
+# Token估算安全系数
+#
+# 这是本次修复最重要的参数之一。
+#
+# 原来的估算明显低估真实请求Token。
+#
+# 因此不再使用：
+#
+# 中文 / 1.5
+# 英文 / 4
+#
+# 而使用更保守的估算。
+# ------------------------------------------------------------
+
+TOKEN_ESTIMATE_SAFETY_FACTOR = 1.45
+
+
+# ------------------------------------------------------------
+# 请求失败后自动拆分
+# ------------------------------------------------------------
+
+ENABLE_AUTO_SPLIT = True
 
 
 # ============================================================
@@ -109,6 +139,7 @@ def get_client():
     api_key = os.getenv("GROQ_API_KEY")
 
     if not api_key:
+
         raise RuntimeError(
             "GROQ_API_KEY 未配置"
         )
@@ -200,61 +231,10 @@ market_relevant = false
 
 
 ============================================================
-分类示例
-============================================================
-
-Fed决定维持或调整利率：
-
-→ 宏观经济与央行政策
-
-
-某公司公布季度财报：
-
-→ 公司重大事件
-
-
-公司宣布重大并购：
-
-→ 公司重大事件
-
-
-美国提高对某国商品关税：
-
-→ 地缘政治与制裁
-
-
-美国与伊朗发生军事冲突：
-
-→ 地缘政治与制裁
-
-
-军事冲突导致石油供应受到重大影响，
-新闻核心重点是能源供应和油价：
-
-→ 能源与大宗商品
-
-
-AI芯片公司发布重大产品或财报：
-
-→ AI与半导体
-
-
-美元大幅波动，
-核心事件是汇率市场：
-
-→ 外汇与债券
-
-
-股票市场整体发生重大变化：
-
-→ 全球股市
-
-
-============================================================
 三、核心事实原则
 ============================================================
 
-core_fact 必须严格来自输入新闻。
+core_fact必须严格来自输入新闻。
 
 只能总结输入新闻中明确存在的信息。
 
@@ -268,7 +248,8 @@ core_fact 必须严格来自输入新闻。
 - 添加新闻之外的政策
 - 添加新闻之外的人物表态
 
-如果输入信息不足，
+如果输入信息不足：
+
 必须保持谨慎。
 
 
@@ -409,10 +390,6 @@ event_id必须：
 - 编造时间
 - 编造新闻链接
 
-如果无法确认：
-
-保持谨慎。
-
 
 ============================================================
 十、输出原则
@@ -432,8 +409,10 @@ event_id必须：
 8. 不允许输出代码块
 9. 只返回合法JSON
 10. 不进行最终评分
+11. 不进行TOP10
+12. 不进行最终排序
 
-输出字段必须严格为：
+每条结果严格包含：
 
 id
 market_relevant
@@ -446,36 +425,85 @@ impact_scope_level
 impact_degree_level
 
 不要输出reasoning。
+
+不要输出额外字段。
 """
 
 
 # ============================================================
+# 新闻预处理
+# ============================================================
+
+def prepare_articles(articles):
+
+    prepared = []
+
+    for article in articles:
+
+        prepared.append({
+
+            "id": article["id"],
+
+            "title": article.get(
+                "title",
+                ""
+            ),
+
+            "summary": article.get(
+                "summary",
+                ""
+            ),
+
+            "source": article.get(
+                "source",
+                ""
+            ),
+
+            "url": article.get(
+                "url",
+                ""
+            )
+
+        })
+
+    return prepared
+
+
+# ============================================================
 # Token估算
+#
+# 核心修复：
+#
+# 不再使用过于乐观的中文/英文比例估算。
+#
+# 采用统一保守字符比例，
+# 再乘安全系数。
 # ============================================================
 
 def estimate_tokens(text):
 
     if not text:
+
         return 0
 
     text = str(text)
 
-    chinese_count = sum(
-        1
-        for char in text
-        if "\u4e00" <= char <= "\u9fff"
-    )
+    # --------------------------------------------------------
+    # 基础字符估算
+    #
+    # 混合中英文新闻统一采用约2字符/token的保守估算。
+    # --------------------------------------------------------
 
-    other_count = len(text) - chinese_count
+    base_tokens = len(text) / 2.0
 
-    estimated = (
-        chinese_count / 1.5
-        + other_count / 4
+    safe_tokens = (
+        base_tokens
+        * TOKEN_ESTIMATE_SAFETY_FACTOR
     )
 
     return max(
         1,
-        int(estimated)
+        int(safe_tokens)
     )
 
 
@@ -496,76 +524,61 @@ def estimate_article_tokens(article):
 
 
 # ============================================================
-# Prompt固定开销
+# System Prompt Token估算
+# ============================================================
+
+def estimate_system_tokens():
+
+    return estimate_tokens(
+        SYSTEM_PROMPT
+    )
+
+
+# ============================================================
+# 用户Prompt固定开销
 # ============================================================
 
 def estimate_prompt_overhead():
 
+    # System prompt
+    #
+    # JSON Object要求
+    #
+    # 输入说明
+    #
+    # 额外安全空间
+
     return (
-        estimate_tokens(
-            SYSTEM_PROMPT
-        )
+        estimate_system_tokens()
         + 700
     )
 
 
 # ============================================================
-# 动态计算completion tokens
-#
-# 这是本版本最重要的修改。
-#
-# 不再固定：
-#
-# max_completion_tokens=1500
-# max_completion_tokens=1980
-# max_completion_tokens=6000
-#
-# 而是根据本批新闻数量动态计算。
-#
-# 同时考虑：
-#
-# 1. GPT-OSS reasoning
-# 2. JSON输出
-# 3. 输入Token
-# 4. Groq TPM安全空间
+# 动态输出Token
 # ============================================================
 
-def calculate_completion_tokens(
-    input_tokens,
+def calculate_output_tokens(
     article_count
 ):
 
-    # 根据新闻数量计算基础输出预算。
-    article_based_tokens = (
+    calculated = (
         article_count
         * OUTPUT_TOKENS_PER_ARTICLE
     )
 
-    # 至少保证足够生成完整JSON。
-    requested_tokens = max(
-        MIN_COMPLETION_TOKENS,
-        article_based_tokens
+    calculated = max(
+        calculated,
+        MIN_OUTPUT_TOKENS
     )
 
-    # 不允许超过安全Token预算。
-    available_tokens = (
-        TOKEN_SAFETY_LIMIT
-        - input_tokens
+    calculated = min(
+        calculated,
+        MAX_OUTPUT_TOKENS
     )
 
-    if available_tokens <= 0:
-
-        return 0
-
-    completion_tokens = min(
-        requested_tokens,
-        available_tokens,
-        MAX_COMPLETION_TOKENS
-    )
-
-    return max(
-        1,
-        int(completion_tokens)
+    return int(
+        calculated
     )
 
 
@@ -589,36 +602,58 @@ def estimate_batch_tokens(
             )
         )
 
-    completion_tokens = (
-        calculate_completion_tokens(
-            input_tokens,
-            len(articles)
-        )
+    output_tokens = calculate_output_tokens(
+        len(articles)
     )
 
-    estimated_total = (
+    total_tokens = (
         input_tokens
-        + completion_tokens
+        + output_tokens
     )
 
     return (
         input_tokens,
-        completion_tokens,
-        estimated_total
+        output_tokens,
+        total_tokens
     )
 
 
 # ============================================================
-# 自动生成批次
+# 判断批次是否安全
+# ============================================================
+
+def is_batch_safe(
+    articles
+):
+
+    if not articles:
+
+        return True
+
+    if len(articles) > MAX_ARTICLES_PER_BATCH:
+
+        return False
+
+    (
+        input_tokens,
+        output_tokens,
+        total_tokens
+    ) = estimate_batch_tokens(
+        articles
+    )
+
+    return (
+        total_tokens
+        <= TOKEN_SAFETY_LIMIT
+    )
+
+
+# ============================================================
+# 自动生成初始批次
 #
-# 单批最多50条。
+# 50条只是硬上限。
 #
-# 但真正优先级：
-#
-# Token安全 > 新闻数量
-#
-# 如果50条新闻无法满足Token安全，
-# 自动提前切批。
+# Token安全优先。
 # ============================================================
 
 def build_batches(
@@ -627,73 +662,39 @@ def build_batches(
 
     batches = []
 
-    current_batch = []
+    current = []
 
     for article in articles:
 
         candidate = (
-            current_batch
+            current
             + [article]
         )
 
-        (
-            input_tokens,
-            completion_tokens,
-            total_tokens
-        ) = estimate_batch_tokens(
-            candidate
-        )
-
-        too_many_articles = (
-            len(candidate)
-            > MAX_ARTICLES_PER_BATCH
-        )
-
-        # ----------------------------------------------------
-        # 如果当前批已经有新闻，
-        # 且继续加入后超过Token安全预算，
-        # 则切批。
-        #
-        # 注意：
-        # 这里要求completion也必须有足够空间。
-        # ----------------------------------------------------
-
-        insufficient_completion = (
-            completion_tokens
-            < MIN_COMPLETION_TOKENS
-        )
-
-        too_many_tokens = (
-            total_tokens
-            > TOKEN_SAFETY_LIMIT
-        )
-
         if (
-            current_batch
-            and (
-                too_many_articles
-                or too_many_tokens
-                or insufficient_completion
+            current
+            and not is_batch_safe(
+                candidate
             )
         ):
 
             batches.append(
-                current_batch
+                current
             )
 
-            current_batch = [
+            current = [
                 article
             ]
 
         else:
 
-            current_batch = candidate
+            current = candidate
 
 
-    if current_batch:
+    if current:
 
         batches.append(
-            current_batch
+            current
         )
 
 
@@ -701,39 +702,36 @@ def build_batches(
 
 
 # ============================================================
-# AI失败结果
+# 如果单条新闻本身估算过大
 # ============================================================
 
-def mark_analysis_failed(
-    articles
+def force_split_batch(
+    batch
 ):
 
-    failed = []
+    if len(batch) <= 1:
 
-    for article in articles:
+        return [batch]
 
-        item = dict(
-            article
-        )
+    midpoint = len(batch) // 2
 
-        item["market_relevant"] = False
+    return [
 
-        item["ai_analysis_failed"] = True
+        batch[:midpoint],
 
-        failed.append(
-            item
-        )
+        batch[midpoint:]
 
-    return failed
+    ]
 
 
 # ============================================================
-# 清理JSON
+# JSON清理
 # ============================================================
 
 def clean_json_text(text):
 
     if not text:
+
         return ""
 
     text = text.strip()
@@ -760,7 +758,7 @@ def clean_json_text(text):
     ):
 
         text = text[
-            :-len("```")
+            :-3
         ]
 
 
@@ -768,14 +766,14 @@ def clean_json_text(text):
 
 
 # ============================================================
-# 提取结果数组
+# 提取JSON结果
 #
 # 兼容：
 #
-# 1. [...]
-# 2. {"results":[...]}
-# 3. {"articles":[...]}
-# 4. {"data":[...]}
+# []
+# {"results":[]}
+# {"articles":[]}
+# {"data":[]}
 # ============================================================
 
 def extract_results(
@@ -821,13 +819,6 @@ def extract_results(
 
 # ============================================================
 # 验证AI结果
-#
-# 必须：
-#
-# 1. 数量一致
-# 2. 每个结果是对象
-# 3. ID完整
-# 4. ID不重复
 # ============================================================
 
 def validate_ai_results(
@@ -856,6 +847,12 @@ def validate_ai_results(
         )
 
 
+    expected_ids = {
+        str(x)
+        for x in expected_ids
+    }
+
+
     actual_ids = set()
 
 
@@ -867,7 +864,7 @@ def validate_ai_results(
         ):
 
             raise ValueError(
-                "Groq返回结果中存在非JSON对象"
+                "Groq返回结果存在非JSON对象"
             )
 
 
@@ -895,17 +892,11 @@ def validate_ai_results(
         )
 
 
-    expected_id_set = {
-        str(item_id)
-        for item_id in expected_ids
-    }
-
-
-    if actual_ids != expected_id_set:
+    if actual_ids != expected_ids:
 
         raise ValueError(
-            "Groq返回的新闻ID与输入不一致："
-            f"期望={sorted(expected_id_set)}, "
+            "Groq返回ID不完整或错误："
+            f"期望={sorted(expected_ids)}, "
             f"实际={sorted(actual_ids)}"
         )
 
@@ -918,58 +909,48 @@ def validate_ai_results(
 # ============================================================
 
 def build_batch_prompt(
-    prepared_articles
+    articles
 ):
 
-    articles_json = json.dumps(
-        prepared_articles,
-        ensure_ascii=False
+    count = len(
+        articles
     )
 
-    count = len(
-        prepared_articles
+
+    articles_json = json.dumps(
+        articles,
+        ensure_ascii=False
     )
 
 
     return f"""
-请一次性分析下面全部新闻。
+请分析下面全部 {count} 条新闻。
 
-输入新闻数量：
+必须对每一个id返回一个且仅一个结果。
 
-{count}
-
-新闻数据：
+输入新闻：
 
 {articles_json}
 
 
-必须为每一条新闻返回一个分析结果。
-
-必须返回：
-
-{count}
-
-条结果。
-
-
-JSON顶层必须是一个对象。
-
-唯一允许的顶层结构：
+============================================================
+必须返回的JSON结构
+============================================================
 
 {{
-    "results": [
-        {{
-            "id": 1,
-            "market_relevant": true,
-            "event_type": "事件本身是什么",
-            "category": "分类",
-            "core_fact": "核心事实",
-            "market_impact_reason": "金融市场影响原因",
-            "event_id": "核心事件标识",
-            "impact_scope_level": "global",
-            "impact_degree_level": "high"
-        }}
-    ]
+  "results": [
+    {{
+      "id": 1,
+      "market_relevant": true,
+      "event_type": "事件本身是什么",
+      "category": "分类",
+      "core_fact": "核心事实",
+      "market_impact_reason": "金融市场影响原因",
+      "event_id": "核心事件标识",
+      "impact_scope_level": "global",
+      "impact_degree_level": "high"
+    }}
+  ]
 }}
 
 
@@ -977,13 +958,13 @@ JSON顶层必须是一个对象。
 严格要求
 ============================================================
 
-1. 必须返回全部{count}条结果。
+1. results必须包含全部 {count} 条新闻。
 
-2. 每一个输入id都必须返回。
+2. 每一个输入id必须返回。
 
-3. id必须与输入完全一致。
+3. id必须完全对应输入。
 
-4. 不允许遗漏任何id。
+4. 不允许遗漏id。
 
 5. 不允许增加不存在的id。
 
@@ -991,10 +972,7 @@ JSON顶层必须是一个对象。
 
 7. market_relevant只能是true或false。
 
-8. 没有明确金融市场影响时：
-   market_relevant=false。
-
-9. category只能使用：
+8. category只能使用：
 
 宏观经济与央行政策
 全球股市
@@ -1005,17 +983,21 @@ AI与半导体
 公司重大事件
 其他市场事件
 
-10. category必须依据事件本身决定。
+9. category必须根据“事件本身是什么”判断。
 
-11. core_fact只能根据输入新闻。
+10. 不允许按照关键词机械分类。
 
-12. 禁止编造输入新闻之外的信息。
+11. core_fact只能来自输入新闻。
 
-13. market_impact_reason只能根据输入新闻判断。
+12. market_impact_reason只能来自输入新闻。
 
-14. event_id用于识别同一事件。
+13. 不允许编造任何信息。
 
-15. impact_scope_level只能使用：
+14. event_id必须描述核心事件。
+
+15. 同一事件的不同报道尽可能使用相同event_id。
+
+16. impact_scope_level只能使用：
 
 global
 multi_region
@@ -1025,46 +1007,39 @@ industry
 company
 limited
 
-16. impact_degree_level只能使用：
+17. impact_degree_level只能使用：
 
 very_high
 high
 medium
 low
 
-17. 不要计算分数。
+18. 不计算最终评分。
 
-18. 不要计算来源可信度。
+19. 不计算来源可信度。
 
-19. 不要计算时效性评分。
+20. 不进行TOP10筛选。
 
-20. 不要进行TOP10筛选。
+21. 不进行新闻排序。
 
-21. 不要进行新闻排序。
+22. 不输出Markdown。
 
-22. 不要输出Markdown。
+23. 不输出代码块。
 
-23. 不要输出代码块。
+24. 不输出解释文字。
 
-24. 不要输出解释文字。
+25. 不输出reasoning。
 
-25. 不要输出reasoning。
+26. 只返回合法JSON。
 
-26. 不要输出任何额外字段。
+27. JSON顶层必须是对象。
 
-27. 只返回合法JSON。
+28. JSON对象必须包含results数组。
 
-28. JSON顶层必须是对象。
+29. 不要输出任何额外字段。
 
-29. JSON对象必须包含results数组。
+30. 即使market_relevant=false，也必须返回完整字段。
 
-30. results数组必须包含全部{count}条新闻。
-
-31. 如果新闻没有金融市场影响，
-    仍然必须返回该新闻的完整分析结果，
-    不能跳过。
-
-32. 不允许因为篇幅原因减少返回数量。
 """
 
 
@@ -1074,38 +1049,31 @@ low
 
 def request_groq_batch(
     client,
-    prompt,
     batch,
     batch_number
 ):
 
-    last_error = None
-
-
-    # --------------------------------------------------------
-    # 动态计算本批completion token
-    # --------------------------------------------------------
-
-    (
-        input_tokens,
-        completion_tokens,
-        estimated_total
-    ) = estimate_batch_tokens(
+    prompt = build_batch_prompt(
         batch
     )
-
-
-    if completion_tokens <= 0:
-
-        raise RuntimeError(
-            f"第{batch_number}批无法获得足够的输出Token预算"
-        )
 
 
     expected_ids = [
         article["id"]
         for article in batch
     ]
+
+
+    (
+        estimated_input,
+        estimated_output,
+        estimated_total
+    ) = estimate_batch_tokens(
+        batch
+    )
+
+
+    last_error = None
 
 
     for attempt in range(
@@ -1118,65 +1086,108 @@ def request_groq_batch(
             f"第{attempt}次请求"
         )
 
+
+        # ----------------------------------------------------
+        # 动态输出Token
+        # ----------------------------------------------------
+
+        max_completion_tokens = (
+            calculate_output_tokens(
+                len(batch)
+            )
+        )
+
+
         print(
-            f"本次max_completion_tokens："
-            f"{completion_tokens}"
+            "本次max_completion_tokens："
+            f"{max_completion_tokens}"
         )
 
 
         try:
 
-            response = (
-                client.chat.completions.create(
+            response = client.chat.completions.create(
 
-                    model=GROQ_MODEL,
+                model=GROQ_MODEL,
 
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": SYSTEM_PROMPT
-                        },
-                        {
-                            "role": "user",
-                            "content": prompt
-                        }
-                    ],
-
-                    temperature=0,
-
-                    # ------------------------------------------------
-                    # GPT-OSS
-                    #
-                    # 使用低推理强度。
-                    # 不使用include_reasoning。
-                    # ------------------------------------------------
-
-                    reasoning_effort="low",
-
-                    # ------------------------------------------------
-                    # JSON Object Mode
-                    # ------------------------------------------------
-
-                    response_format={
-                        "type": "json_object"
+                messages=[
+                    {
+                        "role": "system",
+                        "content": SYSTEM_PROMPT
                     },
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
 
-                    # ------------------------------------------------
-                    # 动态completion Token
-                    #
-                    # 不再固定1500/1980/6000。
-                    # ------------------------------------------------
+                temperature=0,
 
-                    max_completion_tokens=(
-                        completion_tokens
-                    )
+                reasoning_effort="low",
+
+                # ------------------------------------------------
+                # GPT-OSS reasoning不返回给业务层
+                # ------------------------------------------------
+
+                reasoning_format="hidden",
+
+                # ------------------------------------------------
+                # JSON Object Mode
+                # ------------------------------------------------
+
+                response_format={
+                    "type": "json_object"
+                },
+
+                # ------------------------------------------------
+                # 动态输出上限
+                # ------------------------------------------------
+
+                max_completion_tokens=(
+                    max_completion_tokens
                 )
+
             )
 
 
-            text = response.choices[
-                0
-            ].message.content
+            # ----------------------------------------------------
+            # 获取finish_reason
+            # ----------------------------------------------------
+
+            choice = response.choices[0]
+
+            finish_reason = getattr(
+                choice,
+                "finish_reason",
+                None
+            )
+
+
+            print(
+                f"Groq第{batch_number}批"
+                f"finish_reason："
+                f"{finish_reason}"
+            )
+
+
+            # ----------------------------------------------------
+            # 如果因为长度停止
+            # ----------------------------------------------------
+
+            if finish_reason in (
+                "length",
+                "max_tokens"
+            ):
+
+                raise ValueError(
+                    "Groq输出达到Token上限，"
+                    "JSON结果可能不完整"
+                )
+
+
+            text = (
+                choice.message.content
+            )
 
 
             if not text:
@@ -1191,10 +1202,27 @@ def request_groq_batch(
             )
 
 
-            result = json.loads(
-                text
-            )
+            # ----------------------------------------------------
+            # JSON解析
+            # ----------------------------------------------------
 
+            try:
+
+                result = json.loads(
+                    text
+                )
+
+            except json.JSONDecodeError as e:
+
+                raise ValueError(
+                    "Groq返回内容不是合法JSON："
+                    f"{e}"
+                )
+
+
+            # ----------------------------------------------------
+            # 兼容results/articles/data
+            # ----------------------------------------------------
 
             results = extract_results(
                 result
@@ -1205,18 +1233,13 @@ def request_groq_batch(
 
                 raise ValueError(
                     "Groq返回JSON对象，"
-                    "但没有找到results、articles或data数组"
+                    "但没有找到results、"
+                    "articles或data数组"
                 )
 
 
             # ----------------------------------------------------
-            # 非常重要：
-            #
-            # JSON虽然合法，
-            # 但如果只返回4条而输入22条，
-            # 仍然视为失败。
-            #
-            # 进入重试。
+            # ID完整性验证
             # ----------------------------------------------------
 
             validate_ai_results(
@@ -1224,6 +1247,10 @@ def request_groq_batch(
                 expected_ids
             )
 
+
+            # ----------------------------------------------------
+            # 成功
+            # ----------------------------------------------------
 
             return results
 
@@ -1252,37 +1279,311 @@ def request_groq_batch(
 
 
     raise RuntimeError(
-        f"Groq第{batch_number}批达到最大重试次数："
+        f"Groq第{batch_number}批"
+        f"达到最大重试次数："
         f"{last_error}"
     )
 
 
 # ============================================================
-# 合并批次结果
+# 分析单个批次
+#
+# 如果批次失败：
+#
+# 1. 重试3次
+# 2. 仍失败 -> 自动二分
+# 3. 子批次继续执行
+#
+# 这是本版真正解决：
+#
+# “39条只返回14条”
+#
+# 的核心机制。
 # ============================================================
 
-def merge_batch_results(
-    all_results
+def analyze_batch_recursive(
+    client,
+    batch,
+    batch_label
 ):
 
-    merged = []
+    try:
 
-    for result in all_results:
+        print(
+            "\n------------------------------------------------------------"
+        )
+
+        print(
+            f"正在分析批次：{batch_label}"
+        )
+
+        print(
+            f"本批新闻数量："
+            f"{len(batch)}"
+        )
+
+
+        (
+            input_tokens,
+            output_tokens,
+            total_tokens
+        ) = estimate_batch_tokens(
+            batch
+        )
+
+
+        print(
+            f"预计输入Token："
+            f"{input_tokens}"
+        )
+
+        print(
+            f"动态输出Token："
+            f"{output_tokens}"
+        )
+
+        print(
+            f"预计总Token："
+            f"{total_tokens}"
+        )
+
+
+        print(
+            "------------------------------------------------------------"
+        )
+
+
+        results = request_groq_batch(
+            client,
+            batch,
+            batch_label
+        )
+
+
+        print(
+            f"批次{batch_label}分析成功："
+            f"{len(results)}条"
+        )
+
+
+        return results
+
+
+    except Exception as e:
+
+        print(
+            f"\n批次{batch_label}分析失败："
+            f"{e}"
+        )
+
+
+        # ----------------------------------------------------
+        # 无法继续拆分
+        # ----------------------------------------------------
+
+        if (
+            not ENABLE_AUTO_SPLIT
+            or len(batch) <= MIN_ARTICLES_PER_BATCH
+        ):
+
+            raise RuntimeError(
+                f"批次{batch_label}最终失败："
+                f"{e}"
+            )
+
+
+        # ----------------------------------------------------
+        # 自动二分
+        # ----------------------------------------------------
+
+        sub_batches = force_split_batch(
+            batch
+        )
+
+
+        print(
+            "\n============================================================"
+        )
+
+        print(
+            f"批次{batch_label}无法稳定完成。"
+        )
+
+        print(
+            f"自动拆分为："
+            f"{len(sub_batches)}个子批次"
+        )
+
+        print(
+            "不会使用当前批次的残缺结果。"
+        )
+
+        print(
+            "============================================================"
+        )
+
+
+        all_sub_results = []
+
+
+        for index, sub_batch in enumerate(
+            sub_batches,
+            1
+        ):
+
+            sub_label = (
+                f"{batch_label}.{index}"
+            )
+
+
+            sub_results = (
+                analyze_batch_recursive(
+                    client,
+                    sub_batch,
+                    sub_label
+                )
+            )
+
+
+            all_sub_results.extend(
+                sub_results
+            )
+
+
+        # ----------------------------------------------------
+        # 拆分后再次验证
+        # ----------------------------------------------------
+
+        expected_ids = [
+            article["id"]
+            for article in batch
+        ]
+
+
+        validate_ai_results(
+            all_sub_results,
+            expected_ids
+        )
+
+
+        print(
+            f"批次{batch_label}"
+            f"拆分分析完成："
+            f"{len(all_sub_results)}条"
+        )
+
+
+        return all_sub_results
+
+
+# ============================================================
+# 整体失败标记
+# ============================================================
+
+def mark_analysis_failed(
+    articles
+):
+
+    failed = []
+
+    for article in articles:
+
+        item = dict(
+            article
+        )
+
+        item["market_relevant"] = False
+
+        item["ai_analysis_failed"] = True
+
+        failed.append(
+            item
+        )
+
+    return failed
+
+
+# ============================================================
+# 最终结果合并
+# ============================================================
+
+def merge_and_validate_all_results(
+    results,
+    articles
+):
+
+    expected_ids = {
+        str(article["id"])
+        for article in articles
+    }
+
+
+    if len(results) != len(
+        articles
+    ):
+
+        raise ValueError(
+            "最终结果数量错误："
+            f"期望={len(articles)}, "
+            f"实际={len(results)}"
+        )
+
+
+    result_map = {}
+
+
+    for item in results:
 
         if not isinstance(
-            result,
-            list
+            item,
+            dict
         ):
 
             raise ValueError(
-                "存在无效批次结果"
+                "最终结果包含非JSON对象"
             )
 
-        merged.extend(
-            result
+
+        if "id" not in item:
+
+            raise ValueError(
+                "最终结果缺少id"
+            )
+
+
+        item_id = str(
+            item["id"]
         )
 
-    return merged
+
+        if item_id in result_map:
+
+            raise ValueError(
+                f"最终结果存在重复ID："
+                f"{item_id}"
+            )
+
+
+        result_map[
+            item_id
+        ] = item
+
+
+    actual_ids = set(
+        result_map.keys()
+    )
+
+
+    if actual_ids != expected_ids:
+
+        raise ValueError(
+            "最终结果ID不完整："
+            f"期望={sorted(expected_ids)}, "
+            f"实际={sorted(actual_ids)}"
+        )
+
+
+    return result_map
 
 
 # ============================================================
@@ -1305,18 +1606,17 @@ def analyze_news_list(
     # 建立全局ID
     # ========================================================
 
-    prepared_all = []
+    prepared = []
 
 
-    for global_index, article in enumerate(
+    for index, article in enumerate(
         articles,
         1
     ):
 
-        prepared_all.append({
+        prepared.append({
 
-            "id":
-                global_index,
+            "id": index,
 
             "title":
                 article.get(
@@ -1341,15 +1641,16 @@ def analyze_news_list(
                     "url",
                     ""
                 )
+
         })
 
 
     # ========================================================
-    # 自动Token安全分批
+    # 初始批次
     # ========================================================
 
     batches = build_batches(
-        prepared_all
+        prepared
     )
 
 
@@ -1390,24 +1691,28 @@ def analyze_news_list(
     )
 
     print(
+        "自动拆分：开启"
+    )
+
+    print(
         "============================================================"
     )
 
 
     print(
-        f"自动生成分析批次："
+        f"自动生成初始批次："
         f"{len(batches)} 批"
     )
 
 
-    for batch_index, batch in enumerate(
+    for index, batch in enumerate(
         batches,
         1
     ):
 
         (
             input_tokens,
-            completion_tokens,
+            output_tokens,
             total_tokens
         ) = estimate_batch_tokens(
             batch
@@ -1415,165 +1720,53 @@ def analyze_news_list(
 
 
         print(
-            f"  第{batch_index}批："
+            f"  第{index}批："
             f"{len(batch)}条，"
             f"预计输入Token："
             f"{input_tokens}，"
             f"动态输出Token："
-            f"{completion_tokens}，"
+            f"{output_tokens}，"
             f"预计总Token："
             f"{total_tokens}"
         )
 
 
     # ========================================================
-    # 逐批请求
+    # 分析所有批次
     # ========================================================
 
     all_results = []
 
 
-    for batch_index, batch in enumerate(
-        batches,
-        1
-    ):
-
-        print(
-            "\n------------------------------------------------------------"
-        )
-
-        print(
-            f"正在分析第 "
-            f"{batch_index}/{len(batches)} 批"
-        )
-
-        print(
-            f"本批新闻数量："
-            f"{len(batch)}"
-        )
-
-
-        (
-            input_tokens,
-            completion_tokens,
-            total_tokens
-        ) = estimate_batch_tokens(
-            batch
-        )
-
-
-        print(
-            f"预计输入Token："
-            f"{input_tokens}"
-        )
-
-        print(
-            f"动态输出Token："
-            f"{completion_tokens}"
-        )
-
-        print(
-            f"预计总Token："
-            f"{total_tokens}"
-        )
-
-        print(
-            "------------------------------------------------------------"
-        )
-
-
-        prompt = build_batch_prompt(
-            batch
-        )
-
-
-        # ----------------------------------------------------
-        # 请求 + 完整性验证
-        #
-        # 如果：
-        #
-        # 22条输入
-        # 只返回4条
-        #
-        # request_groq_batch会判定失败，
-        # 自动重试。
-        # ----------------------------------------------------
-
-        try:
-
-            batch_results = request_groq_batch(
-
-                client,
-
-                prompt,
-
-                batch,
-
-                batch_index
-
-            )
-
-
-        except Exception as e:
-
-            print(
-                "\n============================================================"
-            )
-
-            print(
-                "Groq批量新闻分析整体失败"
-            )
-
-            print(
-                f"失败批次："
-                f"{batch_index}/{len(batches)}"
-            )
-
-            print(
-                f"失败原因："
-                f"{e}"
-            )
-
-            print(
-                "不会使用不完整分析结果。"
-            )
-
-            print(
-                "============================================================"
-            )
-
-            return mark_analysis_failed(
-                articles
-            )
-
-
-        # ----------------------------------------------------
-        # request_groq_batch已经验证过ID，
-        # 这里再次记录结果。
-        # ----------------------------------------------------
-
-        all_results.append(
-            batch_results
-        )
-
-
-        print(
-            f"第{batch_index}批分析成功："
-            f"{len(batch_results)}条"
-        )
-
-
-    # ========================================================
-    # 所有批次成功
-    #
-    # 此处才允许合并。
-    # ========================================================
-
     try:
 
-        merged_results = (
-            merge_batch_results(
-                all_results
+        for index, batch in enumerate(
+            batches,
+            1
+        ):
+
+            batch_results = (
+                analyze_batch_recursive(
+                    client,
+                    batch,
+                    str(index)
+                )
+            )
+
+
+            all_results.extend(
+                batch_results
+            )
+
+
+        # ----------------------------------------------------
+        # 所有批次完成后才做最终验证
+        # ----------------------------------------------------
+
+        result_map = (
+            merge_and_validate_all_results(
+                all_results,
+                prepared
             )
         )
 
@@ -1585,175 +1778,21 @@ def analyze_news_list(
         )
 
         print(
-            f"批次合并失败：{e}"
+            "Groq批量新闻分析整体失败"
         )
 
         print(
-            "不会使用不完整分析结果。"
+            f"失败原因：{e}"
         )
 
         print(
-            "============================================================"
-        )
-
-        return mark_analysis_failed(
-            articles
-        )
-
-
-    # ========================================================
-    # 最终数量验证
-    # ========================================================
-
-    if len(
-        merged_results
-    ) != len(articles):
-
-        print(
-            "\n============================================================"
-        )
-
-        print(
-            "Groq全部批次合并后数量错误"
-        )
-
-        print(
-            f"期望：{len(articles)}"
-        )
-
-        print(
-            f"实际：{len(merged_results)}"
-        )
-
-        print(
-            "不会使用不完整分析结果。"
+            "不会使用任何不完整分析结果。"
         )
 
         print(
             "============================================================"
         )
 
-        return mark_analysis_failed(
-            articles
-        )
-
-
-    # ========================================================
-    # 最终全局ID验证
-    # ========================================================
-
-    result_map = {}
-
-
-    try:
-
-        for item in merged_results:
-
-            if not isinstance(
-                item,
-                dict
-            ):
-
-                raise ValueError(
-                    "存在非JSON对象结果"
-                )
-
-
-            if "id" not in item:
-
-                raise ValueError(
-                    "最终结果缺少id"
-                )
-
-
-            item_id = str(
-                item["id"]
-            )
-
-
-            if item_id in result_map:
-
-                raise ValueError(
-                    f"发现重复全局ID：{item_id}"
-                )
-
-
-            result_map[
-                item_id
-            ] = item
-
-
-    except Exception as e:
-
-        print(
-            "\n============================================================"
-        )
-
-        print(
-            f"Groq最终结果ID验证失败：{e}"
-        )
-
-        print(
-            "不会使用不完整分析结果。"
-        )
-
-        print(
-            "============================================================"
-        )
-
-        return mark_analysis_failed(
-            articles
-        )
-
-
-    # ========================================================
-    # 验证全部ID
-    # ========================================================
-
-    expected_global_ids = {
-        str(i)
-        for i in range(
-            1,
-            len(articles) + 1
-        )
-    }
-
-
-    actual_global_ids = set(
-        result_map.keys()
-    )
-
-
-    if (
-        actual_global_ids
-        != expected_global_ids
-    ):
-
-        print(
-            "\n============================================================"
-        )
-
-        print(
-            "Groq最终结果存在ID遗漏或增加"
-        )
-
-        print(
-            f"期望ID："
-            f"{sorted(expected_global_ids)}"
-        )
-
-        print(
-            f"实际ID："
-            f"{sorted(actual_global_ids)}"
-        )
-
-        print(
-            "不会使用不完整分析结果。"
-        )
-
-        print(
-            "============================================================"
-        )
 
         return mark_analysis_failed(
             articles
@@ -1777,12 +1816,12 @@ def analyze_news_list(
         ]
 
 
-        article_copy = dict(
+        item = dict(
             article
         )
 
 
-        article_copy.update({
+        item.update({
 
             "market_relevant":
                 bool(
@@ -1836,42 +1875,43 @@ def analyze_news_list(
 
             "ai_analysis_failed":
                 False
+
         })
 
 
         analyzed.append(
-            article_copy
+            item
         )
 
 
         print(
             f"[{index}/{len(articles)}] "
-            f"{article_copy.get('title', '')}"
+            f"{item.get('title', '')}"
         )
 
         print(
             f"  金融市场相关："
-            f"{article_copy.get('market_relevant')}"
+            f"{item.get('market_relevant')}"
         )
 
         print(
             f"  分类："
-            f"{article_copy.get('category')}"
+            f"{item.get('category')}"
         )
 
         print(
             f"  事件："
-            f"{article_copy.get('event_type')}"
+            f"{item.get('event_type')}"
         )
 
         print(
             f"  影响范围："
-            f"{article_copy.get('impact_scope_level')}"
+            f"{item.get('impact_scope_level')}"
         )
 
         print(
             f"  影响程度："
-            f"{article_copy.get('impact_degree_level')}"
+            f"{item.get('impact_degree_level')}"
         )
 
 
@@ -1889,17 +1929,16 @@ def analyze_news_list(
     )
 
     print(
-        f"实际分析批次："
-        f"{len(batches)} 批"
-    )
-
-    print(
         "AI调用方式："
-        "自动Token安全分批 + 动态输出Token"
+        "Token安全分批 + 失败自动拆分"
     )
 
     print(
-        "所有批次均通过JSON结构及ID完整性验证"
+        "所有批次均通过ID完整性验证"
+    )
+
+    print(
+        "未使用任何残缺分析结果"
     )
 
     print(
@@ -1912,10 +1951,6 @@ def analyze_news_list(
 
 # ============================================================
 # 单条新闻分析
-#
-# 正式日报使用：
-#
-# analyze_news_list()
 # ============================================================
 
 def analyze_news(
@@ -1939,11 +1974,12 @@ def analyze_news(
 
         "ai_analysis_failed":
             True
+
     }
 
 
 # ============================================================
-# 测试
+# 本地测试
 # ============================================================
 
 if __name__ == "__main__":
@@ -1961,6 +1997,7 @@ if __name__ == "__main__":
 
         "url":
             "https://example.com"
+
     }
 
 
