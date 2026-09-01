@@ -12,39 +12,58 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # ============================================================
+      # 1. 拉取代码
+      # ============================================================
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ============================================================
+      # 2. 设置 Python
+      # ============================================================
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
+      # ============================================================
+      # 3. 安装依赖
+      # ============================================================
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # ============================================================
+      # 4. 检查源代码
+      # ============================================================
       - name: Check source files
         run: |
           echo "当前目录："
           pwd
+
           echo "src目录内容："
           ls -la src
-          
-      - name: Verify news_data.py
+
+      # ============================================================
+      # 5. 检查当前 Commit
+      # ============================================================
+      - name: Verify source version
         run: |
           echo "当前 Commit："
           git rev-parse HEAD
-          echo "news_data.py 第660-670行："
-          nl -ba src/news_data.py | sed -n '660,670p'
 
+          echo "当前分支："
+          git branch --show-current
+
+      # ============================================================
+      # 6. 运行全球金融市场日报 Agent
+      #
+      # Groq API Key 从 GitHub Secrets 注入
+      # Python 通过 GROQ_API_KEY 获取
+      # ============================================================
       - name: Run Market Agent
-        run: |
-          python src/market_data.py
-          
-      - name: Run news data
         env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |
-          python src/news_data.py
+          python src/main.py
