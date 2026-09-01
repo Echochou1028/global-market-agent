@@ -3,5 +3,5 @@ pandas
 yfinance
 feedparser
 python-dotenv
-openai>=1.99.0
+openai==3.6.0
 groq
