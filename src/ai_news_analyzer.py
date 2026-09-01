@@ -22,7 +22,7 @@ from openai import OpenAI
 # 3. 新闻数量限制
 # 4. 来源可信度评分
 #
-# 上述硬规则由 news_scoring.py 执行。
+# 最终评分、去重、排序等硬规则由本地 Python 执行。
 #
 # 核心架构：
 #
@@ -33,6 +33,8 @@ from openai import OpenAI
 # Groq 一次批量分析
 # ↓
 # 结构化 JSON
+# ↓
+# 本地严格校验
 # ↓
 # 本地去重 / 评分 / 排序
 # ↓
@@ -56,7 +58,6 @@ def get_client():
     api_key = os.getenv("GROQ_API_KEY")
 
     if not api_key:
-
         raise RuntimeError(
             "GROQ_API_KEY 未配置"
         )
@@ -77,9 +78,9 @@ SYSTEM_PROMPT = """
 你的任务不是判断新闻“看起来重要不重要”，
 而是判断新闻事件本身是否对金融市场具有实际影响。
 
-必须严格遵守以下原则：
-
+============================================================
 一、金融市场相关性
+============================================================
 
 只有对金融市场具有实际影响力的信息才进入最终新闻池。
 
@@ -99,9 +100,12 @@ SYSTEM_PROMPT = """
 - 地缘政治
 
 普通社会新闻、娱乐、体育、生活方式新闻，
-如果没有明确金融市场影响，必须判定为 false。
+如果没有明确金融市场影响，
+必须判定为 false。
 
+============================================================
 二、分类原则
+============================================================
 
 必须按照“事件本身是什么”进行分类。
 
@@ -119,7 +123,8 @@ Fed加息决定
 美国与加拿大提高关税
 → 地缘政治与制裁
 
-伊朗冲突导致霍尔木兹海峡运输风险
+伊朗冲突导致霍尔木兹海峡运输风险：
+
 如果核心事件是军事冲突
 → 地缘政治与制裁
 
@@ -140,9 +145,11 @@ Fed加息决定
 7. 公司重大事件
 8. 其他市场事件
 
+============================================================
 三、事实原则
+============================================================
 
-只能根据新闻提供的信息进行判断。
+只能根据输入新闻提供的信息进行判断。
 
 绝对禁止：
 
@@ -153,12 +160,14 @@ Fed加息决定
 - 编造市场行情
 - 编造来源
 - 编造引用
+- 使用输入新闻之外的知识补充事实
 
-如果新闻无法确认事实，
-必须降低可信判断，
-不能自行补充事实。
+如果新闻内容不足以确认某个事实，
+不得自行推测。
 
+============================================================
 四、来源原则
+============================================================
 
 新闻来源可能包括：
 
@@ -171,9 +180,11 @@ Fed加息决定
 
 来源本身不能决定新闻是否重要。
 
-来源只影响后续的“来源可信度”评分。
+来源只作为后续“来源可信度”评分的依据。
 
+============================================================
 五、分析目标
+============================================================
 
 对于每条新闻：
 
@@ -181,28 +192,76 @@ Fed加息决定
 2. 判断事件本身是什么
 3. 确定分类
 4. 提取核心事实
-5. 判断是否可能与其他新闻属于同一事件
+5. 说明为什么可能影响金融市场
+6. 生成用于本地去重的 event_key
 
-不要进行最终分数计算。
+不要进行任何最终分数计算。
 
-最终评分由程序执行。
-
-六、输出原则
+============================================================
+六、输出规则
+============================================================
 
 你将一次性分析多条新闻。
 
 必须按照输入新闻的 id 返回对应分析结果。
 
-必须返回合法 JSON。
+必须：
 
-禁止输出 Markdown。
+- 返回所有输入 id
+- 不遗漏任何 id
+- 不增加不存在的 id
+- 每个 id 只能出现一次
+- id 必须保持与输入完全一致
+- 不输出 Markdown
+- 不输出解释文字
+- 不输出 ```json
+- 只返回合法 JSON object
 
-禁止输出解释文字。
+JSON object 必须使用：
 
-禁止输出 ```json。
+{
+    "results": [...]
+}
 
-只允许返回 JSON 数组。
+results 必须是数组。
+
+============================================================
+七、重要约束
+============================================================
+
+不要因为新闻数量较多而省略新闻。
+
+不要合并不同新闻。
+
+即使多条新闻可能属于同一事件，
+也必须分别返回对应 id 的分析结果。
+
+event_key 用于后续本地程序判断是否属于同一事件。
+
+不要进行评分。
+
+不要决定 TOP10。
+
+不要删除新闻。
+
+最终新闻筛选、去重、评分、排序由本地程序完成。
 """
+
+
+# ============================================================
+# 允许的新闻分类
+# ============================================================
+
+VALID_CATEGORIES = {
+    "宏观经济与央行政策",
+    "全球股市",
+    "AI与半导体",
+    "能源与大宗商品",
+    "外汇与债券",
+    "地缘政治与制裁",
+    "公司重大事件",
+    "其他市场事件"
+}
 
 
 # ============================================================
@@ -213,45 +272,267 @@ def prepare_articles(articles):
 
     prepared = []
 
-    for index, article in enumerate(
-        articles,
-        1
-    ):
+    for index, article in enumerate(articles, 1):
 
         prepared.append({
 
             "id": index,
 
-            "title":
-                article.get(
-                    "title",
-                    ""
-                ),
+            "title": article.get(
+                "title",
+                ""
+            ),
 
-            "summary":
-                article.get(
-                    "summary",
-                    ""
-                ),
+            "summary": article.get(
+                "summary",
+                ""
+            ),
 
-            "source":
-                article.get(
-                    "source",
-                    ""
-                ),
+            "source": article.get(
+                "source",
+                ""
+            ),
 
-            "url":
-                article.get(
-                    "url",
-                    ""
-                )
+            "url": article.get(
+                "url",
+                ""
+            )
         })
 
     return prepared
 
 
 # ============================================================
-# 批量分析
+# AI失败处理
+# ============================================================
+
+def mark_analysis_failed(articles):
+
+    for article in articles:
+
+        article["market_relevant"] = False
+
+        article["ai_analysis_failed"] = True
+
+    return articles
+
+
+# ============================================================
+# 校验 AI 返回结果
+# ============================================================
+
+def validate_results(
+    result,
+    expected_ids
+):
+
+    # --------------------------------------------------------
+    # 必须是 object
+    # --------------------------------------------------------
+
+    if not isinstance(
+        result,
+        dict
+    ):
+
+        raise ValueError(
+            "Groq 返回结果不是 JSON object"
+        )
+
+
+    # --------------------------------------------------------
+    # 必须存在 results
+    # --------------------------------------------------------
+
+    results = result.get(
+        "results"
+    )
+
+    if not isinstance(
+        results,
+        list
+    ):
+
+        raise ValueError(
+            "Groq 返回 JSON object，但缺少 results 数组"
+        )
+
+
+    # --------------------------------------------------------
+    # 建立 ID 映射
+    # --------------------------------------------------------
+
+    result_map = {}
+
+    for item in results:
+
+        if not isinstance(
+            item,
+            dict
+        ):
+
+            raise ValueError(
+                "Groq results 中存在非 JSON object 元素"
+            )
+
+        item_id = item.get(
+            "id"
+        )
+
+        if item_id is None:
+
+            raise ValueError(
+                "Groq 返回结果存在缺失 id 的项目"
+            )
+
+        item_id = str(
+            item_id
+        )
+
+        if item_id in result_map:
+
+            raise ValueError(
+                f"Groq 返回重复 id：{item_id}"
+            )
+
+        result_map[item_id] = item
+
+
+    # --------------------------------------------------------
+    # 检查是否存在不存在的 ID
+    # --------------------------------------------------------
+
+    expected_id_set = {
+        str(item)
+        for item in expected_ids
+    }
+
+    returned_id_set = set(
+        result_map.keys()
+    )
+
+
+    unexpected_ids = (
+        returned_id_set
+        - expected_id_set
+    )
+
+    if unexpected_ids:
+
+        raise ValueError(
+            f"Groq 返回了输入中不存在的 id："
+            f"{sorted(unexpected_ids)}"
+        )
+
+
+    # --------------------------------------------------------
+    # 检查是否遗漏 ID
+    # --------------------------------------------------------
+
+    missing_ids = (
+        expected_id_set
+        - returned_id_set
+    )
+
+    if missing_ids:
+
+        raise ValueError(
+            f"Groq 返回结果缺失 id："
+            f"{sorted(missing_ids)}"
+        )
+
+
+    # --------------------------------------------------------
+    # 检查数量
+    # --------------------------------------------------------
+
+    if len(result_map) != len(
+        expected_ids
+    ):
+
+        raise ValueError(
+            "Groq 返回结果数量与输入新闻数量不一致"
+        )
+
+
+    return result_map
+
+
+# ============================================================
+# 校验单条 AI 分析结果
+# ============================================================
+
+def validate_item(item):
+
+    # --------------------------------------------------------
+    # market_relevant
+    # --------------------------------------------------------
+
+    market_relevant = item.get(
+        "market_relevant"
+    )
+
+    if not isinstance(
+        market_relevant,
+        bool
+    ):
+
+        raise ValueError(
+            "market_relevant 必须是 true 或 false"
+        )
+
+
+    # --------------------------------------------------------
+    # category
+    # --------------------------------------------------------
+
+    category = item.get(
+        "category",
+        ""
+    )
+
+    if category not in VALID_CATEGORIES:
+
+        raise ValueError(
+            f"非法新闻分类：{category}"
+        )
+
+
+    # --------------------------------------------------------
+    # 文本字段
+    # --------------------------------------------------------
+
+    required_text_fields = [
+        "event_type",
+        "core_fact",
+        "market_impact_reason",
+        "event_key"
+    ]
+
+    for field in required_text_fields:
+
+        value = item.get(
+            field
+        )
+
+        if not isinstance(
+            value,
+            str
+        ):
+
+            raise ValueError(
+                f"{field} 必须是字符串"
+            )
+
+        if not value.strip():
+
+            raise ValueError(
+                f"{field} 不能为空"
+            )
+
+
+# ============================================================
+# 批量分析新闻
 # ============================================================
 
 def analyze_news_list(
@@ -284,7 +565,7 @@ def analyze_news_list(
     )
 
     print(
-        "分析模式：全量批量分析"
+        "分析模式：一次全量批量分析"
     )
 
     print(
@@ -292,20 +573,29 @@ def analyze_news_list(
     )
 
 
-    # --------------------------------------------------------
-    # 将所有新闻一次性组成一个 JSON 输入
-    # --------------------------------------------------------
+    # ========================================================
+    # 新闻 JSON
+    # ========================================================
 
     articles_json = json.dumps(
         prepared_articles,
-        ensure_ascii=False
+        ensure_ascii=False,
+        separators=(
+            ",",
+            ":"
+        )
     )
 
+
+    # ========================================================
+    # 用户 Prompt
+    # ========================================================
 
     prompt = f"""
 请一次性分析下面全部新闻。
 
 输入新闻数量：
+
 {len(prepared_articles)}
 
 新闻数据：
@@ -313,39 +603,47 @@ def analyze_news_list(
 {articles_json}
 
 
-请对每一条新闻进行分析。
+============================================================
+返回要求
+============================================================
 
-必须返回一个 JSON 数组。
-
-每一个数组元素必须包含：
+必须返回：
 
 {{
-    "id": 1,
-    "market_relevant": true,
-    "event_type": "事件本身是什么",
-    "category": "分类",
-    "core_fact": "只根据新闻内容提取核心事实",
-    "market_impact_reason": "为什么该事件可能影响金融市场",
-    "event_key": "用于判断同一事件的简短事件标识"
+    "results": [
+        {{
+            "id": 1,
+            "market_relevant": true,
+            "event_type": "事件本身是什么",
+            "category": "分类",
+            "core_fact": "只根据输入新闻提取核心事实",
+            "market_impact_reason": "为什么该事件可能影响金融市场",
+            "event_key": "用于本地识别同一事件的简短事件标识"
+        }}
+    ]
 }}
 
 
-严格要求：
+============================================================
+严格要求
+============================================================
 
-1. id 必须与输入新闻的 id 完全一致。
+1. 每一个输入 id 都必须返回。
 
-2. 每一条输入新闻都必须返回一个分析结果。
+2. id 必须与输入完全一致。
 
 3. 不允许遗漏任何 id。
 
-4. 不允许增加输入中不存在的 id。
+4. 不允许增加不存在的 id。
 
-5. market_relevant 必须是 true 或 false。
+5. 每个 id 只能出现一次。
 
-6. 如果没有明确金融市场影响，
+6. market_relevant 必须是 true 或 false。
+
+7. 如果没有明确金融市场影响，
    market_relevant 必须为 false。
 
-7. category 必须从以下分类中选择：
+8. category 必须从以下分类中选择：
 
 宏观经济与央行政策
 全球股市
@@ -356,22 +654,35 @@ AI与半导体
 公司重大事件
 其他市场事件
 
-8. category 必须依据事件本身决定，
-   不能依据关键词机械分类。
+9. category 必须根据“事件本身”决定。
 
-9. core_fact 只能使用输入新闻中的事实。
+10. 不得因为关键词出现就机械分类。
 
-10. 不允许补充新闻中没有出现的信息。
+11. core_fact 只能使用输入新闻中的事实。
 
-11. event_key 用于识别同一事件。
+12. 不得补充输入新闻没有出现的信息。
 
-12. 不要进行任何评分。
+13. market_impact_reason 只能基于输入新闻判断。
 
-13. 不要输出 Markdown。
+14. event_key 用于本地去重。
 
-14. 不要输出 ```json。
+15. 不要进行任何评分。
 
-15. 只返回合法 JSON 数组。
+16. 不要决定 TOP10。
+
+17. 不要删除任何输入新闻。
+
+18. 不要合并不同新闻。
+
+19. 不要输出 Markdown。
+
+20. 不要输出解释文字。
+
+21. 不要输出 ```json。
+
+22. 只返回合法 JSON object。
+
+23. JSON object 顶层必须包含 results 数组。
 """
 
 
@@ -403,58 +714,102 @@ AI与半导体
             }
         )
 
+    except Exception as e:
+
+        print(
+            "\n============================================================"
+        )
+
+        print(
+            "Groq AI 批量分析失败"
+        )
+
+        print(
+            str(e)
+        )
+
+        print(
+            "============================================================"
+        )
+
+        return mark_analysis_failed(
+            articles
+        )
+
+
+    # ========================================================
+    # 获取返回内容
+    # ========================================================
+
+    try:
+
+        text = response.choices[
+            0
+        ].message.content
 
     except Exception as e:
 
         print(
-            f"\nGroq AI 批量分析失败：{e}"
+            f"\nGroq 返回内容读取失败：{e}"
         )
 
-        # ----------------------------------------------------
-        # AI失败时绝不猜测
-        # ----------------------------------------------------
-
-        for article in articles:
-
-            article[
-                "market_relevant"
-            ] = False
-
-            article[
-                "ai_analysis_failed"
-            ] = True
-
-        return articles
-
-
-    # ========================================================
-    # 获取 AI 返回结果
-    # ========================================================
-
-    text = response.choices[0].message.content.strip()
-
-
-    # ========================================================
-    # 清理 Markdown
-    # ========================================================
-
-    if text.startswith("```"):
-
-        text = text.replace(
-            "```json",
-            ""
+        return mark_analysis_failed(
+            articles
         )
 
-        text = text.replace(
-            "```",
-            ""
+
+    if not text:
+
+        print(
+            "\nGroq 返回内容为空"
         )
+
+        return mark_analysis_failed(
+            articles
+        )
+
+
+    text = text.strip()
+
+
+    # ========================================================
+    # 兼容极少数 Markdown 包裹
+    #
+    # 正常情况下系统已经明确禁止 Markdown。
+    # 这里仅作为安全兜底。
+    # ========================================================
+
+    if text.startswith(
+        "```"
+    ):
+
+        if text.startswith(
+            "```json"
+        ):
+
+            text = text[
+                len("```json"):
+            ]
+
+        else:
+
+            text = text[
+                len("```"):
+            ]
+
+        if text.endswith(
+            "```"
+        ):
+
+            text = text[
+                :-3
+            ]
 
         text = text.strip()
 
 
     # ========================================================
-    # 解析 JSON
+    # JSON 解析
     # ========================================================
 
     try:
@@ -463,136 +818,106 @@ AI与半导体
             text
         )
 
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as e:
 
         print(
-            "\nGroq 返回结果不是合法 JSON："
+            "\n============================================================"
         )
 
-        print(text)
+        print(
+            "Groq 返回结果不是合法 JSON"
+        )
 
-        for article in articles:
+        print(
+            f"JSON解析错误：{e}"
+        )
 
-            article[
-                "market_relevant"
-            ] = False
+        print(
+            "============================================================"
+        )
 
-            article[
-                "ai_analysis_failed"
-            ] = True
-
-        return articles
+        return mark_analysis_failed(
+            articles
+        )
 
 
     # ========================================================
-    # 兼容 JSON object
-    #
-    # 因为 response_format=json_object
-    # 要求模型返回 object。
-    #
-    # 因此允许以下形式：
-    #
-    # {
-    #     "results": [...]
-    # }
-    #
-    # 或：
-    #
-    # {
-    #     "articles": [...]
-    # }
+    # 严格校验
     # ========================================================
 
-    if isinstance(
-        result,
-        dict
-    ):
+    expected_ids = range(
+        1,
+        len(articles) + 1
+    )
 
-        if isinstance(
-            result.get("results"),
-            list
-        ):
 
-            result = result["results"]
+    try:
 
-        elif isinstance(
-            result.get("articles"),
-            list
-        ):
+        result_map = validate_results(
+            result,
+            expected_ids
+        )
 
-            result = result["articles"]
+    except Exception as e:
 
-        else:
+        print(
+            "\n============================================================"
+        )
 
-            print(
-                "\nGroq 返回 JSON object，但没有找到 results/articles 数组。"
+        print(
+            "Groq 返回结果校验失败"
+        )
+
+        print(
+            str(e)
+        )
+
+        print(
+            "============================================================"
+        )
+
+        return mark_analysis_failed(
+            articles
+        )
+
+
+    # ========================================================
+    # 校验每一条结果字段
+    # ========================================================
+
+    try:
+
+        for item in result_map.values():
+
+            validate_item(
+                item
             )
 
-            for article in articles:
-
-                article[
-                    "market_relevant"
-                ] = False
-
-                article[
-                    "ai_analysis_failed"
-                ] = True
-
-            return articles
-
-
-    if not isinstance(
-        result,
-        list
-    ):
+    except Exception as e:
 
         print(
-            "\nGroq 返回的数据结构不是 JSON 数组。"
+            "\n============================================================"
         )
 
-        for article in articles:
-
-            article[
-                "market_relevant"
-            ] = False
-
-            article[
-                "ai_analysis_failed"
-            ] = True
-
-        return articles
-
-
-    # ========================================================
-    # 建立 AI 分析结果索引
-    # ========================================================
-
-    result_map = {}
-
-    for item in result:
-
-        if not isinstance(
-            item,
-            dict
-        ):
-
-            continue
-
-        item_id = item.get(
-            "id"
+        print(
+            "Groq AI 分析字段校验失败"
         )
 
-        if item_id is None:
+        print(
+            str(e)
+        )
 
-            continue
+        print(
+            "============================================================"
+        )
 
-        result_map[
-            str(item_id)
-        ] = item
+        return mark_analysis_failed(
+            articles
+        )
 
 
     # ========================================================
-    # 将 AI 结果重新写回原始新闻
+    # 写回原始新闻
     # ========================================================
 
     analyzed = []
@@ -603,81 +928,46 @@ AI与半导体
         1
     ):
 
-        ai_result = result_map.get(
+        ai_result = result_map[
             str(index)
-        )
+        ]
 
-
-        if not ai_result:
-
-            print(
-                f"[{index}/{len(articles)}] "
-                f"AI分析结果缺失："
-                f"{article.get('title', '')}"
-            )
-
-            article[
-                "market_relevant"
-            ] = False
-
-            article[
-                "ai_analysis_failed"
-            ] = True
-
-            analyzed.append(
-                article
-            )
-
-            continue
-
-
-        # ----------------------------------------------------
-        # 写入分析结果
-        # ----------------------------------------------------
 
         article.update({
 
             "market_relevant":
-                ai_result.get(
-                    "market_relevant",
-                    False
-                ),
+                ai_result[
+                    "market_relevant"
+                ],
 
             "event_type":
-                ai_result.get(
-                    "event_type",
-                    ""
-                ),
+                ai_result[
+                    "event_type"
+                ].strip(),
 
             "category":
-                ai_result.get(
-                    "category",
-                    ""
-                ),
+                ai_result[
+                    "category"
+                ].strip(),
 
             "core_fact":
-                ai_result.get(
-                    "core_fact",
-                    ""
-                ),
+                ai_result[
+                    "core_fact"
+                ].strip(),
 
             "market_impact_reason":
-                ai_result.get(
-                    "market_impact_reason",
-                    ""
-                ),
+                ai_result[
+                    "market_impact_reason"
+                ].strip(),
 
             "event_key":
-                ai_result.get(
-                    "event_key",
-                    ""
-                )
+                ai_result[
+                    "event_key"
+                ].strip(),
+
+            "ai_analysis_failed":
+                False
         })
-
-
-        article[
-            "ai_analysis_failed"
-        ] = False
 
 
         analyzed.append(
@@ -719,7 +1009,15 @@ AI与半导体
     )
 
     print(
-        "AI调用方式：全量批量分析"
+        "AI调用方式：一次全量批量分析"
+    )
+
+    print(
+        "AI不负责评分"
+    )
+
+    print(
+        "AI不负责TOP10"
     )
 
     print(
@@ -731,7 +1029,9 @@ AI与半导体
 
 
 # ============================================================
-# 单条测试
+# 单条新闻分析
+#
+# 保留这个函数，兼容项目其他模块调用。
 # ============================================================
 
 def analyze_news(
@@ -747,13 +1047,17 @@ def analyze_news(
         return results[0]
 
     return {
-        "market_relevant": False,
-        "ai_analysis_failed": True
+
+        "market_relevant":
+            False,
+
+        "ai_analysis_failed":
+            True
     }
 
 
 # ============================================================
-# 测试
+# 本地测试
 # ============================================================
 
 if __name__ == "__main__":
@@ -771,7 +1075,6 @@ if __name__ == "__main__":
 
         "url":
             "https://example.com"
-
     }
 
 
@@ -779,6 +1082,10 @@ if __name__ == "__main__":
         test_article
     )
 
+
+    print(
+        "\nAI分析结果："
+    )
 
     print(
         json.dumps(
