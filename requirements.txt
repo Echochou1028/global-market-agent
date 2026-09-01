@@ -3,4 +3,4 @@ pandas
 yfinance
 feedparser
 python-dotenv
-google-genai
+openai
