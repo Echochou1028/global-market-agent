@@ -3,26 +3,66 @@ import os
 import time
 from openai import OpenAI
 
+
 # ============================================================
 # 全球金融市场日报
 # ai_news_analyzer.py
 #
-# 稳定版 v3.1 (已修复 Groq 模型弃用与权限 404/400 问题)
+# 稳定版 v4
+#
+# 本版改动（相对 v3.1）：
+#
+# 1. MODEL_FALLBACK 从5个通道精简为2个：
+#
+#    openai/gpt-oss-120b（主力） → openai/gpt-oss-20b（备用）
+#
+#    删掉的4个（llama-3.3-70b-versatile / llama-3.1-8b-instant /
+#    mixtral-8x7b-32768 / deepseek-r1-distill-llama-70b）
+#    在Groq上已经全部弃用/下线，之前每次熔断都要先陪它们
+#    404/400空转一遍，才能走到真正有效的模型，纯粹浪费时间。
+#
+#    openai/gpt-oss-120b 和 openai/gpt-oss-20b 是两个独立模型，
+#    各自有独立的每日Token额度（TPD），互不共享——
+#    这是当前唯一真正有意义的备用通道。
+#
+#    是否要接入 Gemini 作为第三重兜底：暂时不加，
+#    详见本次对话里的说明，等两个Groq模型真的在生产环境里
+#    出现过同一天都不够用的情况，再考虑加。
+#
+# 2. 恢复"不使用任何不完整分析结果"的严格原则：
+#
+#    只要有一个批次两个模型都失败，整次AI分析立即判定失败，
+#    不再"保留已成功批次、继续往下跑"——
+#    那种做法会让日报在完全不提示的情况下，
+#    只覆盖当天一小部分新闻，这是本版明确要修掉的行为。
+#
+# 3. 批量大小、Token预算、限速逻辑维持v3.1的数值不变——
+#    这些在实际运行日志里已经验证有效（10条/批，
+#    finish_reason全部是stop，没有出现截断），没有理由重调。
 # ============================================================
 
-# 最新确认有效的 Groq 免费模型序列
-MODEL_FALLBACK_PIPELINE = [
-    {"provider": "groq", "model": "openai/gpt-oss-120b"},
-    {"provider": "groq", "model": "llama-3.3-70b-versatile"},
-    {"provider": "groq", "model": "llama-3.1-8b-instant"},
-    {"provider": "groq", "model": "mixtral-8x7b-32768"},
-    {"provider": "groq", "model": "deepseek-r1-distill-llama-70b"},
-    # 若在 GitHub Secrets 配置 GEMINI_API_KEY，可实现无限量容灾
-    {"provider": "gemini", "model": "gemini-1.5-flash"}
+
+# ============================================================
+# Groq 模型 fallback 顺序
+#
+# 只保留Groq上真实存在、当前仍受支持的模型。
+# 两者是独立模型，独立的TPM/TPD额度池，
+# 主力额度耗尽时切到备用是真正有效的容灾，
+# 不是在空转不存在的模型。
+# ============================================================
+
+MODEL_FALLBACK = [
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
 ]
+
 
 # ============================================================
 # 批次与Token控制
+#
+# 数值沿用v3.1——实际运行日志显示10条/批 + 这版精简后的
+# SYSTEM_PROMPT，finish_reason全部是stop，没有截断，
+# 没必要重新调整。
 # ============================================================
 
 MAX_ARTICLES_PER_BATCH = 10
@@ -33,30 +73,32 @@ MAX_OUTPUT_TOKEN_RESERVE = 2500
 
 MAX_RETRIES = 2
 RETRY_DELAY_SECONDS = 2
+
 GROQ_TPM_LIMIT = 8000
 RATE_LIMIT_SAFETY_FACTOR = 1.1
 MIN_BATCH_INTERVAL_SECONDS = 10
 
 
-def get_client_for_provider(provider):
-    if provider == "groq":
-        api_key = os.getenv("GROQ_API_KEY")
-        if not api_key:
-            return None
-        return OpenAI(
-            api_key=api_key,
-            base_url="https://api.groq.com/openai/v1"
-        )
-    elif provider == "gemini":
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            return None
-        return OpenAI(
-            api_key=api_key,
-            base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
-        )
-    return None
+# ============================================================
+# 初始化 Groq 客户端
+# ============================================================
 
+def get_client():
+
+    api_key = os.getenv("GROQ_API_KEY")
+
+    if not api_key:
+        raise RuntimeError("GROQ_API_KEY 未配置")
+
+    return OpenAI(
+        api_key=api_key,
+        base_url="https://api.groq.com/openai/v1"
+    )
+
+
+# ============================================================
+# AI系统规则
+# ============================================================
 
 SYSTEM_PROMPT = """你是一个金融市场新闻分析引擎。
 任务：分析输入的新闻，提取关键市场信息，判断其对金融市场的实际影响。
@@ -170,12 +212,21 @@ def extract_results(result):
 
 def validate_ai_results(results, expected_ids):
     if not isinstance(results, list) or len(results) != len(expected_ids):
-        raise ValueError(f"返回数量错误：期望 {len(expected_ids)} 条，实际 {len(results) if isinstance(results, list) else 0} 条")
+        raise ValueError(
+            f"返回数量错误：期望 {len(expected_ids)} 条，"
+            f"实际 {len(results) if isinstance(results, list) else 0} 条"
+        )
 
-    actual_ids = {str(item.get("id")) for item in results if isinstance(item, dict) and "id" in item}
+    actual_ids = {
+        str(item.get("id"))
+        for item in results
+        if isinstance(item, dict) and "id" in item
+    }
     expected_id_set = {str(x) for x in expected_ids}
     if actual_ids != expected_id_set:
-        raise ValueError(f"返回ID不完整：期望={sorted(expected_id_set)}, 实际={sorted(actual_ids)}")
+        raise ValueError(
+            f"返回ID不完整：期望={sorted(expected_id_set)}, 实际={sorted(actual_ids)}"
+        )
     return True
 
 
@@ -193,7 +244,19 @@ def execute_chat_completion(client, model_name, messages, max_tokens):
     return client.chat.completions.create(**kwargs)
 
 
-def request_batch_with_fallback(articles, batch_number):
+# ============================================================
+# 单批请求（带模型fallback）
+#
+# 429（限流）/ 404（模型不存在）/ 400+decommissioned（模型下线）
+# 立即熔断切换下一个模型，不在明知必挂的模型上浪费重试次数。
+#
+# 其余异常（解析失败、截断等）在同一个模型上重试
+# MAX_RETRIES 次，仍失败才切下一个模型。
+#
+# 两个模型都失败 → 抛异常，交给上层判定整次分析失败。
+# ============================================================
+
+def request_batch_with_fallback(client, articles, batch_number):
     prompt = build_batch_prompt(articles)
     expected_ids = [article["id"] for article in articles]
     _, output_tokens, total_tokens = estimate_batch_tokens(articles)
@@ -204,19 +267,13 @@ def request_batch_with_fallback(articles, batch_number):
         {"role": "user", "content": prompt}
     ]
 
-    for model_cfg in MODEL_FALLBACK_PIPELINE:
-        provider = model_cfg["provider"]
-        model_name = model_cfg["model"]
-        client = get_client_for_provider(provider)
-
-        if not client:
-            continue
+    for model_name in MODEL_FALLBACK:
 
         for attempt in range(1, MAX_RETRIES + 1):
-            print(f"批次 [{batch_number}] -> 尝试通道【{provider.upper()} : {model_name}】(第{attempt}次)")
+            print(f"批次 [{batch_number}] -> 尝试模型【{model_name}】(第{attempt}次)")
             try:
                 response = execute_chat_completion(client, model_name, messages, output_tokens)
-                
+
                 finish_reason = response.choices[0].finish_reason
                 usage = response.usage
                 usage_total_tokens = usage.total_tokens if usage else total_tokens
@@ -234,29 +291,36 @@ def request_batch_with_fallback(articles, batch_number):
                     raise ValueError("未找到 results 数组")
 
                 validate_ai_results(results, expected_ids)
-                
+
                 if usage:
-                    print(f"Token消耗: 输入 {usage.prompt_tokens} + 输出 {usage.completion_tokens} = {usage.total_tokens}")
+                    print(
+                        f"Token消耗: 输入 {usage.prompt_tokens} + "
+                        f"输出 {usage.completion_tokens} = {usage.total_tokens}"
+                    )
                 return results, usage_total_tokens
 
             except Exception as e:
                 last_error = e
                 err_str = str(e).lower()
-                print(f"通道【{model_name}】请求失败: {e}")
+                print(f"模型【{model_name}】请求失败: {e}")
 
-                # 429(限流)、404(未找到)、400(废弃) 立即熔断切换下一模型，不再死循环重试
-                if any(k in err_str for k in ["429", "rate_limit", "404", "model_not_found", "400", "decommissioned"]):
-                    print(f"【通道熔断】检测到不可用或被限流，立即切换下一备用模型...")
+                # 429/404/400/decommissioned：模型本身不可用，
+                # 立即切下一个模型，不浪费剩余重试次数
+                if any(
+                    k in err_str
+                    for k in ["429", "rate_limit", "404", "model_not_found", "400", "decommissioned"]
+                ):
+                    print("【模型熔断】检测到不可用或被限流，立即切换下一模型...")
                     break
 
                 if attempt < MAX_RETRIES:
                     time.sleep(RETRY_DELAY_SECONDS)
 
-    raise RuntimeError(f"所有备选通道均请求失败。最后错误: {last_error}")
+    raise RuntimeError(f"批次[{batch_number}]所有备选模型均请求失败，最后错误: {last_error}")
 
 
 def wait_for_rate_limit(total_tokens_used, elapsed_seconds):
-    target_seconds = (total_tokens_used / GROQ_TPM_LIMIT * 60 * RATE_LIMIT_SAFETY_FACTOR)
+    target_seconds = total_tokens_used / GROQ_TPM_LIMIT * 60 * RATE_LIMIT_SAFETY_FACTOR
     target_seconds = max(target_seconds, MIN_BATCH_INTERVAL_SECONDS)
     sleep_seconds = target_seconds - elapsed_seconds
 
@@ -265,14 +329,41 @@ def wait_for_rate_limit(total_tokens_used, elapsed_seconds):
         time.sleep(sleep_seconds)
 
 
+# ============================================================
+# 分析失败时的兜底标记
+#
+# 严格模式下，只要有一批彻底失败，整次分析全部标记失败——
+# 不使用任何不完整的分析结果。
+# 下游 news_scoring.py 会因为 market_relevant=False
+# 自动把这些新闻全部过滤掉，news_data.py 会走到
+# "数据缺失/获取失败"的分支，而不是悄悄发一份不完整的日报。
+# ============================================================
+
+def mark_analysis_failed(articles):
+    failed = []
+    for article in articles:
+        item = dict(article)
+        item["market_relevant"] = False
+        item["ai_analysis_failed"] = True
+        failed.append(item)
+    return failed
+
+
+# ============================================================
+# 批量分析新闻
+# ============================================================
+
 def analyze_news_list(articles):
     if not articles:
         return []
 
     print("\n============================================================")
     print(f"启动 AI 批量新闻事件分析 (待处理新闻: {len(articles)} 条)")
-    print(f"批次容量: {MAX_ARTICLES_PER_BATCH} 条/批 | 容灾通道数: {len(MODEL_FALLBACK_PIPELINE)}")
+    print(f"批次容量: {MAX_ARTICLES_PER_BATCH} 条/批 | 模型fallback: {' -> '.join(MODEL_FALLBACK)}")
+    print("失败模式：严格（任意批次最终失败 → 整次分析全部作废）")
     print("============================================================")
+
+    client = get_client()
 
     prepared_articles = []
     for idx, item in enumerate(articles, 1):
@@ -286,7 +377,7 @@ def analyze_news_list(articles):
 
     batches = build_batches(prepared_articles)
     total_batches = len(batches)
-    print(f"自动切分优化批次：共 {total_batches} 批\n")
+    print(f"自动切分批次：共 {total_batches} 批\n")
 
     all_batch_results = []
 
@@ -295,7 +386,7 @@ def analyze_news_list(articles):
         batch_start_time = time.time()
 
         try:
-            batch_results, used_tokens = request_batch_with_fallback(batch, batch_index)
+            batch_results, used_tokens = request_batch_with_fallback(client, batch, batch_index)
             all_batch_results.append(batch_results)
             print(f"批次 [{batch_index}] 分析成功 ({len(batch_results)} 条)")
 
@@ -304,54 +395,73 @@ def analyze_news_list(articles):
                 wait_for_rate_limit(used_tokens, elapsed)
 
         except Exception as e:
-            print(f"\n【批次中断警告】第 {batch_index} 批处理异常: {e}")
-            print(f"保留此前已完成的 {len(all_batch_results)} 批数据继续执行...")
-            break
+
+            print(f"\n【批次失败】第 {batch_index}/{total_batches} 批处理异常: {e}")
+            print(
+                f"严格模式：不使用任何不完整分析结果，"
+                f"本次AI分析整体判定失败（此前已成功 {len(all_batch_results)} 批也一并作废）"
+            )
+            print("============================================================\n")
+
+            return mark_analysis_failed(articles)
+
+    # ========================================================
+    # 走到这里说明全部批次都成功了。
+    #
+    # 严格模式下这已经隐含"数量必然对得上"，
+    # 但仍然显式核对一次，作为最后一道防线——
+    # 万一某个批次的validate_ai_results有遗漏，
+    # 这里能兜底发现，而不是让脏数据流到下游。
+    # ========================================================
 
     merged_results = []
     for sublist in all_batch_results:
         if isinstance(sublist, list):
             merged_results.extend(sublist)
 
-    result_map = {str(item["id"]): item for item in merged_results if isinstance(item, dict) and "id" in item}
+    if len(merged_results) != len(prepared_articles):
+        print("\n============================================================")
+        print("全部批次均已成功，但合并后数量校验未通过（不应该发生）")
+        print(f"期望：{len(prepared_articles)}，实际：{len(merged_results)}")
+        print("严格模式：不使用任何不完整分析结果")
+        print("============================================================\n")
+        return mark_analysis_failed(articles)
+
+    result_map = {
+        str(item["id"]): item
+        for item in merged_results
+        if isinstance(item, dict) and "id" in item
+    }
+
+    expected_global_ids = {str(i) for i in range(1, len(articles) + 1)}
+
+    if set(result_map.keys()) != expected_global_ids:
+        print("\n============================================================")
+        print("全部批次均已成功，但最终ID校验未通过（不应该发生）")
+        print("严格模式：不使用任何不完整分析结果")
+        print("============================================================\n")
+        return mark_analysis_failed(articles)
 
     analyzed = []
-    success_count = 0
 
     for idx, original_article in enumerate(articles, 1):
-        str_id = str(idx)
+        ai_data = result_map[str(idx)]
         article = dict(original_article)
-
-        if str_id in result_map:
-            ai_data = result_map[str_id]
-            article.update({
-                "market_relevant": bool(ai_data.get("market_relevant", False)),
-                "event_type": ai_data.get("event_type", ""),
-                "category": ai_data.get("category", "公司、行业与研报"),
-                "core_fact": ai_data.get("core_fact", article.get("summary", "")),
-                "market_impact_reason": ai_data.get("market_impact_reason", ""),
-                "event_id": ai_data.get("event_id", ""),
-                "impact_scope_level": ai_data.get("impact_scope_level", "limited"),
-                "impact_degree_level": ai_data.get("impact_degree_level", "low"),
-                "ai_analysis_failed": False
-            })
-            success_count += 1
-        else:
-            article.update({
-                "market_relevant": False,
-                "event_type": "",
-                "category": "公司、行业与研报",
-                "core_fact": article.get("summary", ""),
-                "market_impact_reason": "",
-                "event_id": "",
-                "impact_scope_level": "limited",
-                "impact_degree_level": "low",
-                "ai_analysis_failed": True
-            })
+        article.update({
+            "market_relevant": bool(ai_data.get("market_relevant", False)),
+            "event_type": ai_data.get("event_type", ""),
+            "category": ai_data.get("category", "公司、行业与研报"),
+            "core_fact": ai_data.get("core_fact", article.get("summary", "")),
+            "market_impact_reason": ai_data.get("market_impact_reason", ""),
+            "event_id": ai_data.get("event_id", ""),
+            "impact_scope_level": ai_data.get("impact_scope_level", "limited"),
+            "impact_degree_level": ai_data.get("impact_degree_level", "low"),
+            "ai_analysis_failed": False
+        })
         analyzed.append(article)
 
     print("\n============================================================")
-    print(f"AI 分析任务全部结束: 原始共 {len(analyzed)} 条，成功分析 {success_count} 条")
+    print(f"AI 分析任务全部完成：{len(analyzed)} 条，全部成功，无不完整数据")
     print("============================================================\n")
 
     return analyzed
