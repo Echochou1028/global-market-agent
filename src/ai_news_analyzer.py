@@ -7,36 +7,29 @@ from openai import OpenAI
 # 全球金融市场日报
 # ai_news_analyzer.py
 #
-# 稳定版 v3.0 (高吞吐 + 多通道容灾 + Token极度压缩)
+# 稳定版 v3.1 (已修复 Groq 模型弃用与权限 404/400 问题)
 # ============================================================
 
-# ============================================================
-# 多模型容灾路由配置
-# ============================================================
-
-# 支持的模型调用链：依次尝试，遇到 429、404、限流则自动无缝降级
+# 最新确认有效的 Groq 免费模型序列
 MODEL_FALLBACK_PIPELINE = [
     {"provider": "groq", "model": "openai/gpt-oss-120b"},
     {"provider": "groq", "model": "llama-3.3-70b-versatile"},
     {"provider": "groq", "model": "llama-3.1-8b-instant"},
-    {"provider": "groq", "model": "gemma2-9b-it"},
-    # 如果配置了 GEMINI_API_KEY，可作为最终硬核兜底通道
+    {"provider": "groq", "model": "mixtral-8x7b-32768"},
+    {"provider": "groq", "model": "deepseek-r1-distill-llama-70b"},
+    # 若在 GitHub Secrets 配置 GEMINI_API_KEY，可实现无限量容灾
     {"provider": "gemini", "model": "gemini-1.5-flash"}
 ]
 
 # ============================================================
-# 批次与Token控制 (经过压测优化)
+# 批次与Token控制
 # ============================================================
 
-MAX_ARTICLES_PER_BATCH = 10       # 提升至每批10条，显著减少系统提示词重复消耗
-TOKEN_SAFETY_LIMIT = 7500         # 安全Token上限
-OUTPUT_TOKENS_PER_ARTICLE = 220   # 单篇输出Token预估
-MIN_OUTPUT_TOKEN_RESERVE = 1200   # 最小输出Token预留
-MAX_OUTPUT_TOKEN_RESERVE = 2500   # 最大输出Token预留
-
-# ============================================================
-# 限速与重试控制
-# ============================================================
+MAX_ARTICLES_PER_BATCH = 10
+TOKEN_SAFETY_LIMIT = 7500
+OUTPUT_TOKENS_PER_ARTICLE = 220
+MIN_OUTPUT_TOKEN_RESERVE = 1200
+MAX_OUTPUT_TOKEN_RESERVE = 2500
 
 MAX_RETRIES = 2
 RETRY_DELAY_SECONDS = 2
@@ -44,10 +37,6 @@ GROQ_TPM_LIMIT = 8000
 RATE_LIMIT_SAFETY_FACTOR = 1.1
 MIN_BATCH_INTERVAL_SECONDS = 10
 
-
-# ============================================================
-# 客户端初始化 (支持 Groq 和 Google Gemini OpenAI-Compatible)
-# ============================================================
 
 def get_client_for_provider(provider):
     if provider == "groq":
@@ -68,10 +57,6 @@ def get_client_for_provider(provider):
         )
     return None
 
-
-# ============================================================
-# 精简版系统规则 Prompt（节省约 35% Prompt Tokens）
-# ============================================================
 
 SYSTEM_PROMPT = """你是一个金融市场新闻分析引擎。
 任务：分析输入的新闻，提取关键市场信息，判断其对金融市场的实际影响。
@@ -107,10 +92,6 @@ SYSTEM_PROMPT = """你是一个金融市场新闻分析引擎。
 }
 """
 
-
-# ============================================================
-# Token 估算与批次构建
-# ============================================================
 
 def estimate_tokens(text):
     if not text:
@@ -164,10 +145,6 @@ def build_batch_prompt(articles):
     return f"请分析以下全部 {count} 条新闻，返回包含全部 {count} 条结果的 JSON 对象：\n\n{articles_json}"
 
 
-# ============================================================
-# 数据清洗与校验
-# ============================================================
-
 def clean_json_text(text):
     if not text:
         return ""
@@ -202,10 +179,6 @@ def validate_ai_results(results, expected_ids):
     return True
 
 
-# ============================================================
-# API 请求调度
-# ============================================================
-
 def execute_chat_completion(client, model_name, messages, max_tokens):
     kwargs = {
         "model": model_name,
@@ -214,7 +187,6 @@ def execute_chat_completion(client, model_name, messages, max_tokens):
         "response_format": {"type": "json_object"},
         "max_completion_tokens": max_tokens
     }
-    # 仅针对支持 reasoning_effort 的模型传递该参数
     if "gpt-oss" in model_name:
         kwargs["reasoning_effort"] = "low"
 
@@ -238,7 +210,7 @@ def request_batch_with_fallback(articles, batch_number):
         client = get_client_for_provider(provider)
 
         if not client:
-            continue  # 未配置对应 API Key 则跳过
+            continue
 
         for attempt in range(1, MAX_RETRIES + 1):
             print(f"批次 [{batch_number}] -> 尝试通道【{provider.upper()} : {model_name}】(第{attempt}次)")
@@ -272,9 +244,9 @@ def request_batch_with_fallback(articles, batch_number):
                 err_str = str(e).lower()
                 print(f"通道【{model_name}】请求失败: {e}")
 
-                # 若触发限流 (429) 或模型不存在 (404)，立即切换下一个模型通道，无需等待
-                if "429" in err_str or "rate limit" in err_str or "404" in err_str or "not found" in err_str:
-                    print(f"【通道熔断】检测到限流或不可用，立即切换至下一备用模型...")
+                # 429(限流)、404(未找到)、400(废弃) 立即熔断切换下一模型，不再死循环重试
+                if any(k in err_str for k in ["429", "rate_limit", "404", "model_not_found", "400", "decommissioned"]):
+                    print(f"【通道熔断】检测到不可用或被限流，立即切换下一备用模型...")
                     break
 
                 if attempt < MAX_RETRIES:
@@ -282,10 +254,6 @@ def request_batch_with_fallback(articles, batch_number):
 
     raise RuntimeError(f"所有备选通道均请求失败。最后错误: {last_error}")
 
-
-# ============================================================
-# 批次限速休眠控制
-# ============================================================
 
 def wait_for_rate_limit(total_tokens_used, elapsed_seconds):
     target_seconds = (total_tokens_used / GROQ_TPM_LIMIT * 60 * RATE_LIMIT_SAFETY_FACTOR)
@@ -296,10 +264,6 @@ def wait_for_rate_limit(total_tokens_used, elapsed_seconds):
         print(f"限速冷却：等待 {sleep_seconds:.1f} 秒 (消耗 Token: {total_tokens_used})...")
         time.sleep(sleep_seconds)
 
-
-# ============================================================
-# 主批量分析流程
-# ============================================================
 
 def analyze_news_list(articles):
     if not articles:
@@ -344,7 +308,6 @@ def analyze_news_list(articles):
             print(f"保留此前已完成的 {len(all_batch_results)} 批数据继续执行...")
             break
 
-    # 聚合所有批次结果
     merged_results = []
     for sublist in all_batch_results:
         if isinstance(sublist, list):
@@ -374,7 +337,6 @@ def analyze_news_list(articles):
             })
             success_count += 1
         else:
-            # 针对未完成批次的兜底填充
             article.update({
                 "market_relevant": False,
                 "event_type": "",
@@ -398,14 +360,3 @@ def analyze_news_list(articles):
 def analyze_news(article):
     results = analyze_news_list([article])
     return results[0] if results else {"market_relevant": False, "ai_analysis_failed": True}
-
-
-if __name__ == "__main__":
-    test_data = [{
-        "title": "Fed signals pause in interest rate hikes amid cooling inflation",
-        "summary": "Federal Reserve officials indicated they may hold benchmark rates steady.",
-        "source": "Yahoo Finance",
-        "url": "https://finance.yahoo.com"
-    }]
-    print("测试分析中...")
-    print(json.dumps(analyze_news_list(test_data), ensure_ascii=False, indent=2))
