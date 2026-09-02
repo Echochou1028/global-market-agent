@@ -18,8 +18,8 @@ on:
     # GitHub Actions 的 schedule 触发是"尽力而为"，官方不保证
     # 精确到分钟，仍可能有 5-30 分钟排队延迟。如果 8:00 前
     # 出报告是硬要求，建议：
-    #   1. 把内部流程压缩到 15-20 分钟内跑完（见下方 timeout-minutes）
-    #   2. 保留 workflow_dispatch，调度明显迟到时可以手动补跑
+    #    1. 把内部流程压缩到 15-20 分钟内跑完（见下方 timeout-minutes）
+    #    2. 保留 workflow_dispatch，调度明显迟到时可以手动补跑
     # ============================================================
     - cron: "23 7 * * *"
       timezone: "Asia/Shanghai"
@@ -52,7 +52,6 @@ jobs:
 
       - name: Set up Python
         uses: actions/setup-python@v5
-
         with:
           python-version: "3.12"
 
@@ -63,9 +62,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-
           python -m pip install --upgrade pip
-
           pip install -r requirements.txt
 
 
@@ -75,27 +72,21 @@ jobs:
 
       - name: Check project files
         run: |
-
           echo "=========================================="
           echo "当前目录"
           echo "=========================================="
-
           pwd
-
 
           echo ""
           echo "=========================================="
           echo "项目文件"
           echo "=========================================="
-
           ls -la
-
 
           echo ""
           echo "=========================================="
           echo "src目录"
           echo "=========================================="
-
           ls -la src
 
 
@@ -105,17 +96,14 @@ jobs:
 
       - name: Check Python files
         run: |
-
           echo "=========================================="
           echo "检查关键文件"
           echo "=========================================="
-
           test -f src/main.py
           test -f src/market_data.py
           test -f src/news_data.py
           test -f src/news_scoring.py
           test -f src/ai_news_analyzer.py
-
           echo "所有关键 Python 文件存在"
 
 
@@ -125,17 +113,14 @@ jobs:
 
       - name: Check Python syntax
         run: |
-
           echo "=========================================="
           echo "检查 Python 语法"
           echo "=========================================="
-
           python -m py_compile src/main.py
           python -m py_compile src/market_data.py
           python -m py_compile src/news_data.py
           python -m py_compile src/news_scoring.py
           python -m py_compile src/ai_news_analyzer.py
-
           echo "Python 语法检查通过"
 
 
@@ -145,11 +130,9 @@ jobs:
 
       - name: Run Market Data
         run: |
-
           echo "=========================================="
           echo "开始获取全球金融市场数据"
           echo "=========================================="
-
           python src/market_data.py
 
 
@@ -158,17 +141,15 @@ jobs:
       #
       # GROQ_API_KEY 从 GitHub Secrets 注入
       # Python 中通过 os.getenv() 获取
+      # 开启 PYTHONUNBUFFERED 与 -u 选项，保证崩溃时输出完整堆栈
       # ======================================================
 
       - name: Run News Data
         env:
-
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-
+          PYTHONUNBUFFERED: "1"
         run: |
-
           echo "=========================================="
           echo "开始获取并分析全球金融市场新闻"
           echo "=========================================="
-
-          python src/news_data.py
+          python -u src/news_data.py
