@@ -747,20 +747,19 @@ def validate_ai_results(results, expected_ids):
 # 请求 Groq
 # ============================================================
 
-def call_groq(client, messages, max_completion_tokens, use_reasoning_effort=True):
+def call_groq(client, messages, max_completion_tokens, model_name=GROQ_MODEL, use_reasoning_effort=True):
     kwargs = {
-        "model": GROQ_MODEL,
+        "model": model_name,
         "messages": messages,
         "temperature": 0,
         "response_format": {"type": "json_object"},
         "max_completion_tokens": max_completion_tokens
     }
 
-    if use_reasoning_effort:
+    if use_reasoning_effort and "gpt-oss" in model_name:
         kwargs["reasoning_effort"] = "low"
 
     return client.chat.completions.create(**kwargs)
-
 
 # ============================================================
 # Groq 免费额度限速
@@ -796,89 +795,93 @@ def request_groq_batch(client, articles, batch_number):
     expected_ids = [article["id"] for article in articles]
     input_tokens, output_tokens, total_tokens = estimate_batch_tokens(articles)
     last_error = None
-    reasoning_effort_supported = True
 
-    for attempt in range(1, MAX_RETRIES + 1):
-        print(f"Groq第{batch_number}批：第{attempt}次请求")
-        print(f"本次max_completion_tokens：{output_tokens}")
+    # 依次尝试备选模型
+    for model_name in GROQ_MODELS:
+        reasoning_effort_supported = True if "gpt-oss" in model_name else False
 
-        try:
-            messages = [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": prompt}
-            ]
+        for attempt in range(1, MAX_RETRIES + 1):
+            print(f"Groq第{batch_number}批：使用模型【{model_name}】第{attempt}次请求")
+            print(f"本次max_completion_tokens：{output_tokens}")
 
             try:
-                response = call_groq(
-                    client,
-                    messages,
-                    output_tokens,
-                    use_reasoning_effort=reasoning_effort_supported
-                )
-            except TypeError as e:
-                error_text = str(e)
-                if "reasoning_effort" in error_text:
-                    print(
-                        "当前OpenAI SDK/Groq接口不支持 reasoning_effort，"
-                        "自动降级为不传该参数。"
-                    )
-                    reasoning_effort_supported = False
+                messages = [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt}
+                ]
+
+                try:
                     response = call_groq(
                         client,
                         messages,
                         output_tokens,
-                        use_reasoning_effort=False
+                        model_name=model_name,
+                        use_reasoning_effort=reasoning_effort_supported
                     )
-                else:
-                    raise
+                except TypeError as e:
+                    error_text = str(e)
+                    if "reasoning_effort" in error_text:
+                        print("当前模型/SDK不支持 reasoning_effort，自动降级为不传该参数。")
+                        reasoning_effort_supported = False
+                        response = call_groq(
+                            client,
+                            messages,
+                            output_tokens,
+                            model_name=model_name,
+                            use_reasoning_effort=False
+                        )
+                    else:
+                        raise
 
-            finish_reason = response.choices[0].finish_reason
-            usage = response.usage
-            usage_total_tokens = usage.total_tokens if usage else total_tokens
+                finish_reason = response.choices[0].finish_reason
+                usage = response.usage
+                usage_total_tokens = usage.total_tokens if usage else total_tokens
 
-            if usage:
-                print(
-                    f"实际Token消耗：输入{usage.prompt_tokens} "
-                    f"输出{usage.completion_tokens} "
-                    f"总计{usage.total_tokens}"
-                )
+                if usage:
+                    print(
+                        f"实际Token消耗：输入{usage.prompt_tokens} "
+                        f"输出{usage.completion_tokens} "
+                        f"总计{usage.total_tokens}"
+                    )
 
-            print(f"finish_reason：{finish_reason}")
+                print(f"finish_reason：{finish_reason}")
 
-            if finish_reason == "length":
-                raise ValueError(
-                    "输出被截断（finish_reason=length），"
-                    f"当前max_completion_tokens={output_tokens}不足以覆盖"
-                    "推理+完整JSON输出，需要增大预算或减小批量"
-                )
+                if finish_reason == "length":
+                    raise ValueError("输出被截断（finish_reason=length）")
 
-            text = response.choices[0].message.content
-            if not text:
-                raise ValueError("Groq返回内容为空")
+                text = response.choices[0].message.content
+                if not text:
+                    raise ValueError("Groq返回内容为空")
 
-            text = clean_json_text(text)
-            result = json.loads(text)
-            results = extract_results(result)
+                text = clean_json_text(text)
+                result = json.loads(text)
+                results = extract_results(result)
 
-            if results is None:
-                raise ValueError(
-                    "Groq返回JSON对象，但没有results、articles或data数组"
-                )
+                if results is None:
+                    raise ValueError("Groq返回JSON对象，但没有results数组")
 
-            validate_ai_results(results, expected_ids)
-            return results, {"total_tokens": usage_total_tokens}
+                validate_ai_results(results, expected_ids)
+                return results, {"total_tokens": usage_total_tokens}
 
-        except Exception as e:
-            last_error = e
-            print(f"Groq第{batch_number}批失败：{e}")
-            if attempt < MAX_RETRIES:
-                print(f"将在{RETRY_DELAY_SECONDS}秒后重试...")
-                time.sleep(RETRY_DELAY_SECONDS)
+            except Exception as e:
+                last_error = e
+                error_str = str(e)
+                print(f"Groq第{batch_number}批（{model_name}）失败：{e}")
 
+                # 捕获 429 配额用尽，直接中断当前模型重试，跳到下一个备用模型
+                if "429" in error_str or "rate_limit_exceeded" in error_str:
+                    print(f"【触发 429 限额】模型 {model_name} 额度用尽，立即尝试下一个备用模型...")
+                    break  # 跳出当前模型的 attempt 循环，进入外层下一个 model_name
+
+                if attempt < MAX_RETRIES:
+                    print(f"将在{RETRY_DELAY_SECONDS}秒后重试...")
+                    time.sleep(RETRY_DELAY_SECONDS)
+
+    # 只有所有模型都尝试失败后才抛出异常
     raise RuntimeError(
-        f"Groq第{batch_number}批达到最大重试次数：{last_error}"
+        f"Groq第{batch_number}批所有备选模型均达到最大重试次数，最后报错：{last_error}"
     )
-
+    
 
 # ============================================================
 # AI失败标记兜底
