@@ -123,6 +123,7 @@ SOURCE_CREDIBILITY = {
     # --------------------------------------------------------
 
     "Federal Reserve": 20,
+    "SEC": 20,
     "U.S. Treasury": 20,
     "U.S. Department of Treasury": 20,
     "U.S. Department of Energy": 20,
