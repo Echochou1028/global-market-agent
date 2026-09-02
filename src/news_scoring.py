@@ -7,122 +7,191 @@ from datetime import datetime
 # news_scoring.py
 #
 # 职责：
+#
 # 1. 接收 Groq AI 新闻分析结果
 # 2. 执行确定性的评分规则
 # 3. 执行同一事件合并
 # 4. 执行最终新闻展示规则
 # 5. 执行最终排序
 #
+# AI负责：
+#   新闻理解
+#   是否具有金融市场影响
+#   事件识别
+#   新闻分类
+#   影响范围等级
+#   影响程度等级
+#
+# 本文件负责：
+#   影响范围评分
+#   影响程度评分
+#   来源可信度评分
+#   同一事件去重
+#   新闻筛选
+#   最终排序
+#
 # 最终评分：
-# 影响范围        40分
-# 影响程度        40分
-# 来源可信度      20分
+#
+# 影响范围       40分
+# 影响程度       40分
+# 来源可信度     20分
 # ----------------
-# 总分            100分
+# 总分           100分
+#
+# 注意：
+# ❌ 不使用关键词判断新闻重要性
+# ❌ 不使用关键词判断新闻分类
+# ❌ 不使用关键词判断影响范围
+# ❌ 不使用关键词判断影响程度
+# ❌ 不使用时效性评分
+#
+# ------------------------------------------------------------
+# 本版改动（v3，筛选机制从"线性加权分数+40分阈值"
+# 改为"分层阈值 + 熔断规则"）：
+#
+# 核心问题：v2 用 impact_scope(40) + impact_degree(40) +
+# source_credibility(20) 相加，再拿总分和40分比大小。
+# 这是线性加权，天然有个副作用——三个维度可以互相"兑换"，
+# 一条 scope小、degree低的新闻，只要来源分够高也能凑够40分；
+# 反过来一条 degree=high 的新闻，也可能因为来源不在名单里
+# 被压到40分以下。用户明确要求换成更"硬"的机制。
+#
+# v3 做法：
+#
+# 1. 新增 classify_tier()，用 (影响范围, 影响程度) 两个维度
+#    直接查表判定"保留 / 低权重 / 丢弃"三档，
+#    来源可信度完全不参与这个判定——只用于同档位内部排序。
+#    具体分层表见 classify_tier() 的实现和注释。
+#
+# 2. 移除 is_guaranteed_keep + GUARANTEED_KEEP_DEGREE_LEVELS，
+#    "very_high无条件保留"现在是 classify_tier() 里分层表的
+#    一部分，不再是叠加在总分之外的补丁规则。
+#
+# 3. score（100分制）仍然保留、仍然计算——但只作为"同一档位
+#    内部排序"和最终展示用的数值，不再是决定新闻能不能进
+#    日报的门槛。
+#
+# 4. CATEGORIES 沿用3类，DEFAULT_CATEGORY、
+#    LOW_SCORE_TOP_N_PER_CATEGORY(=15)、
+#    UNKNOWN_SOURCE_CREDIBILITY(=5) 沿用v2的调整——
+#    这几项跟评分本身/展示相关，不受本次筛选机制改动影响。
+# ------------------------------------------------------------
 # ============================================================
+
 
 # ============================================================
 # 新闻分类（3类分类基准，与 ai_news_analyzer.py 保持一致）
+#
+# 重要原则：
+# "国际 / 中国"不是分类维度，
+# 三个分类都同时覆盖国际与中国市场的同类事件。
 # ============================================================
 
 CATEGORIES = [
+
     "宏观、政策与地缘",
     "市场与资产",
     "公司、行业与研报",
+
 ]
+
+
+# ============================================================
+# 兜底分类
+#
+# AI理论上必须返回3类之一，这里只是防御性兜底，
+# 正常流程不应该触发。
+# ============================================================
 
 DEFAULT_CATEGORY = "公司、行业与研报"
 
 
 # ============================================================
-# 来源可信度 (满分 20分)
+# 来源可信度
 #
-# 根据项目最新确定的四级优先级信源配置：
-# - 第一优先级（官方/交易所一手）：20分
-# - 第二优先级（全球权威金融媒体）：18 - 19分
-# - 第三优先级（国际金融机构）：20分
-# - 第四优先级（知名个人）：预留接口（默认不抓取/0分）
+# 来源只影响20分。
+#
+# 来源权威程度：
+# 不能改变影响范围
+# 不能改变影响程度
 # ============================================================
 
 SOURCE_CREDIBILITY = {
+
     # --------------------------------------------------------
-    # 第一优先级：官方 / 交易所一手信息源 (20分)
+    # 官方机构
     # --------------------------------------------------------
+
     "Federal Reserve": 20,
     "U.S. Treasury": 20,
     "U.S. Department of Treasury": 20,
-    "SEC": 20,
-    "U.S. Securities and Exchange Commission": 20,
-    "BEA": 20,
-    "Bureau of Economic Analysis": 20,
-    "CSRC": 20,
-    "China Securities Regulatory Commission": 20,
-    "中国证监会": 20,
-    "证监会": 20,
-    "HKEX": 20,
-    "Hong Kong Exchanges and Clearing": 20,
-    "香港交易所": 20,
-    "披露易": 20,
-    "NYSE": 20,
-    "New York Stock Exchange": 20,
-    "CME": 20,
-    "CME Group": 20,
-    "芝加哥商品交易所": 20,
-    "CNINFO": 20,
-    "巨潮资讯": 20,
-    "巨潮资讯网": 20,
-    "SSE": 20,
-    "Shanghai Stock Exchange": 20,
-    "上海证券交易所": 20,
-    "上交所": 20,
-    "SZSE": 20,
-    "Shenzhen Stock Exchange": 20,
-    "深圳证券交易所": 20,
-    "深交所": 20,
-    "BSE": 20,
-    "Beijing Stock Exchange": 20,
-    "北京证券交易所": 20,
-    "北交所": 20,
+    "U.S. Department of Energy": 20,
+    "U.S. Department of Commerce": 20,
+
+    "OPEC": 20,
+
+    "ECB": 20,
+    "European Central Bank": 20,
+
+    "Bank of Japan": 20,
+    "BOJ": 20,
+
+    "Bank of England": 20,
+
+    "People's Bank of China": 20,
+    "PBOC": 20,
+
+    "IMF": 20,
+    "World Bank": 20,
+    "BIS": 20,
+
+
     # --------------------------------------------------------
-    # 第二优先级：全球权威金融媒体 (18-19分)
+    # 权威财经媒体
     # --------------------------------------------------------
+
     "Reuters": 19,
-    "路透社": 19,
-    "CNBC": 18,
+    "Bloomberg": 19,
+    "Financial Times": 19,
+    "The Wall Street Journal": 19,
+
     "CNBC Markets": 18,
     "CNBC Finance": 18,
-    "CNBC World News": 18,
-    "CNBC Top News": 18,
-    "Xinhua": 18,
-    "Xinhua News": 18,
-    "新华社": 18,
-    "新华网": 18,
-    # --------------------------------------------------------
-    # 第三优先级：国际金融机构 (20分)
-    # --------------------------------------------------------
-    "IMF": 20,
-    "International Monetary Fund": 20,
-    "BIS": 20,
-    "Bank for International Settlements": 20,
-    "World Bank": 20,
-    "世界银行": 20,
-    # --------------------------------------------------------
-    # 第四优先级：知名个人（预留扩展接口）
-    # --------------------------------------------------------
-    # "Elon Musk": 10,
-    # "Warren Buffett": 10,
+    "CNBC World News": 17,
+    "CNBC Top News": 17,
+
+    "BBC Business": 17,
+
 }
 
 
-# 未知来源默认地板分
+# ============================================================
+# 未知来源默认分
+#
+# 不在上面名单里的来源，不代表不重要——
+# 只是我们没有为它单独定级。
+#
+# 给一个中性偏低的地板分（5/20），而不是0分：
+# 0分会让"来源没被收录"这一个因素，独立决定一条
+# impact_degree=high 的新闻是否落入低权重池，
+# 这不是我们想要的评分逻辑。
+#
+# 仍然遵守"不猜测、不给默认高分"的原则——
+# 5分远低于已知权威来源的17-20分。
+# ============================================================
+
 UNKNOWN_SOURCE_CREDIBILITY = 5
 
 
 # ============================================================
-# 影响范围与程度评分映射
+# 影响范围 → 固定分值
+#
+# Groq只判断等级。
+# Python负责固定换算分数。
 # ============================================================
 
 IMPACT_SCOPE_SCORES = {
+
     "global": 40,
     "multi_region": 32,
     "regional": 24,
@@ -130,348 +199,1144 @@ IMPACT_SCOPE_SCORES = {
     "industry": 8,
     "company": 8,
     "limited": 4,
+
 }
 
+
+# ============================================================
+# 影响程度 → 固定分值
+#
+# Groq只判断等级。
+# Python负责固定换算分数。
+# ============================================================
+
 IMPACT_DEGREE_SCORES = {
+
     "very_high": 40,
     "high": 30,
     "medium": 20,
     "low": 10,
+
 }
 
+
+# ============================================================
+# 影响范围分组
+#
+# 分层判定表把 impact_scope_level 归成三组：
+#
+# 广  —— global / multi_region
+# 中  —— regional / country
+# 窄  —— industry / company / limited
+#
+# 分组只用于 classify_tier() 查表，
+# 不影响 score 计算（score仍按 IMPACT_SCOPE_SCORES 逐级计分）。
+# ============================================================
+
 BROAD_SCOPES = {"global", "multi_region"}
+
 MID_SCOPES = {"regional", "country"}
+
 NARROW_SCOPES = {"industry", "company", "limited"}
+
+
+# ============================================================
+# 低权重新闻：每个分类的保留上限
+#
+# 分类从8类合并为3类之后，单个类目覆盖的新闻面变广了，
+# 固定10条的上限比合并前更容易把同样值得露出的新闻挤掉，
+# 所以上调到15。
+# ============================================================
 
 LOW_SCORE_TOP_N_PER_CATEGORY = 15
 
 
 # ============================================================
-# 工具函数
+# 标准化文本
 # ============================================================
 
 def normalize_text(text):
-    if not text:
-        return ""
-    return str(text).strip()
 
+    if not text:
+
+        return ""
+
+    return str(
+        text
+    ).strip()
+
+
+# ============================================================
+# 来源可信度
+# ============================================================
 
 def get_source_credibility(source):
-    """根据信源名称获取可信度评分（支持原生信源与 RSSHub 转制信源的模糊识别）"""
+
     if not source:
+
         return 0
 
-    source_clean = normalize_text(source)
 
-    # 1. 精确匹配
-    if source_clean in SOURCE_CREDIBILITY:
-        return SOURCE_CREDIBILITY[source_clean]
+    source = normalize_text(
+        source
+    )
 
-    # 2. 模糊匹配（兼容 RSSHub 抓取后可能包含的中文或变体）
-    source_lower = source_clean.lower()
+
+    # 精确匹配
+    if source in SOURCE_CREDIBILITY:
+
+        return SOURCE_CREDIBILITY[
+            source
+        ]
+
+
+    # 模糊匹配
+    source_lower = source.lower()
+
+
     for name, score in SOURCE_CREDIBILITY.items():
+
         if name.lower() in source_lower:
+
             return score
 
-    # 3. 未知来源处理
+
+    # 未知来源
+    #
+    # 不猜测，不给予默认高分，
+    # 但也不再是最惩罚性的0分——
+    # 见上方 UNKNOWN_SOURCE_CREDIBILITY 的说明。
+
     return UNKNOWN_SOURCE_CREDIBILITY
 
 
+# ============================================================
+# 标准化影响范围
+# ============================================================
+
 def normalize_impact_scope(value):
+
     if value is None:
+
         return "limited"
 
-    value = str(value).strip().lower()
+
+    value = str(
+        value
+    ).strip().lower()
+
 
     aliases = {
-        "global": "global",
-        "worldwide": "global",
-        "global_market": "global",
-        "multi_region": "multi_region",
-        "multi-regional": "multi_region",
-        "multiple_regions": "multi_region",
-        "regional": "regional",
-        "country": "country",
-        "national": "country",
-        "single_country": "country",
-        "industry": "industry",
-        "sector": "industry",
-        "company": "company",
-        "single_company": "company",
-        "limited": "limited",
-        "local": "limited",
+
+        "global":
+            "global",
+
+        "worldwide":
+            "global",
+
+        "global_market":
+            "global",
+
+
+        "multi_region":
+            "multi_region",
+
+        "multi-regional":
+            "multi_region",
+
+        "multiple_regions":
+            "multi_region",
+
+
+        "regional":
+            "regional",
+
+
+        "country":
+            "country",
+
+        "national":
+            "country",
+
+        "single_country":
+            "country",
+
+
+        "industry":
+            "industry",
+
+        "sector":
+            "industry",
+
+
+        "company":
+            "company",
+
+        "single_company":
+            "company",
+
+
+        "limited":
+            "limited",
+
+        "local":
+            "limited",
+
     }
 
-    return aliases.get(value, "limited")
 
-
-def normalize_impact_degree(value):
-    if value is None:
-        return "low"
-
-    value = str(value).strip().lower()
-
-    aliases = {
-        "very_high": "very_high",
-        "very-high": "very_high",
-        "critical": "very_high",
-        "extreme": "very_high",
-        "high": "high",
-        "major": "high",
-        "medium": "medium",
-        "moderate": "medium",
-        "low": "low",
-        "minor": "low",
-    }
-
-    return aliases.get(value, "low")
-
-
-def score_impact_scope(article):
-    level = normalize_impact_scope(article.get("impact_scope_level"))
-    return IMPACT_SCOPE_SCORES.get(level, 4)
-
-
-def score_impact_degree(article):
-    level = normalize_impact_degree(article.get("impact_degree_level"))
-    return IMPACT_DEGREE_SCORES.get(level, 10)
+    return aliases.get(
+        value,
+        "limited"
+    )
 
 
 # ============================================================
-# 评分计算 (仅用于同档内排序)
+# 标准化影响程度
+# ============================================================
+
+def normalize_impact_degree(value):
+
+    if value is None:
+
+        return "low"
+
+
+    value = str(
+        value
+    ).strip().lower()
+
+
+    aliases = {
+
+        "very_high":
+            "very_high",
+
+        "very-high":
+            "very_high",
+
+        "critical":
+            "very_high",
+
+        "extreme":
+            "very_high",
+
+
+        "high":
+            "high",
+
+        "major":
+            "high",
+
+
+        "medium":
+            "medium",
+
+        "moderate":
+            "medium",
+
+
+        "low":
+            "low",
+
+        "minor":
+            "low",
+
+    }
+
+
+    return aliases.get(
+        value,
+        "low"
+    )
+
+
+# ============================================================
+# 影响范围评分
+# ============================================================
+
+def score_impact_scope(article):
+
+    level = normalize_impact_scope(
+        article.get(
+            "impact_scope_level"
+        )
+    )
+
+
+    return IMPACT_SCOPE_SCORES.get(
+        level,
+        4
+    )
+
+
+# ============================================================
+# 影响程度评分
+# ============================================================
+
+def score_impact_degree(article):
+
+    level = normalize_impact_degree(
+        article.get(
+            "impact_degree_level"
+        )
+    )
+
+
+    return IMPACT_DEGREE_SCORES.get(
+        level,
+        10
+    )
+
+
+# ============================================================
+# 最终评分
+#
+# 固定公式：
+#
+# 影响范围       40
+# +
+# 影响程度       40
+# +
+# 来源可信度     20
+# =
+# 总分           100
+#
+# 不包含时效性评分。
+#
+# 注意：score只用于同一档位内部排序和最终展示，
+# 新闻能不能进日报由 classify_tier() 单独判定，
+# 不再依赖这里算出来的分数是否过线。
 # ============================================================
 
 def calculate_score(article):
-    impact_scope = score_impact_scope(article)
-    impact_degree = score_impact_degree(article)
-    source_credibility = get_source_credibility(article.get("source", ""))
 
-    impact_scope = min(max(impact_scope, 0), 40)
-    impact_degree = min(max(impact_degree, 0), 40)
-    source_credibility = min(max(source_credibility, 0), 20)
+    impact_scope = score_impact_scope(
+        article
+    )
 
-    total_score = impact_scope + impact_degree + source_credibility
 
-    article["impact_scope"] = impact_scope
-    article["impact_degree"] = impact_degree
-    article["source_credibility"] = source_credibility
-    article["score"] = total_score
+    impact_degree = score_impact_degree(
+        article
+    )
+
+
+    source_credibility = get_source_credibility(
+        article.get(
+            "source",
+            ""
+        )
+    )
+
+
+    # 强制边界
+
+    impact_scope = min(
+        max(
+            impact_scope,
+            0
+        ),
+        40
+    )
+
+
+    impact_degree = min(
+        max(
+            impact_degree,
+            0
+        ),
+        40
+    )
+
+
+    source_credibility = min(
+        max(
+            source_credibility,
+            0
+        ),
+        20
+    )
+
+
+    total_score = (
+        impact_scope
+        + impact_degree
+        + source_credibility
+    )
+
+
+    article["impact_scope"] = (
+        impact_scope
+    )
+
+    article["impact_degree"] = (
+        impact_degree
+    )
+
+    article["source_credibility"] = (
+        source_credibility
+    )
+
+    article["score"] = (
+        total_score
+    )
+
 
     return article
 
 
 # ============================================================
-# 分层硬规则门槛 (classify_tier)
+# 分层阈值判定表
+#
+# 用 (影响范围分组, 影响程度) 两个维度直接查表，
+# 判定这条新闻属于 "keep / low_weight / discard" 三档之一。
+#
+# 来源可信度不参与这个判定——
+# 一条新闻该不该进日报，只取决于AI判断的影响范围和影响程度，
+# 这也符合项目一直坚持的原则："来源权威不能提高影响范围/程度"，
+# 这里做得更彻底：来源干脆不参与"要不要保留"的判断。
+#
+#                  very_high   high     medium      low
+#   广(global/     keep        keep     keep        low_weight
+#   multi_region)
+#   中(regional/   keep        keep     low_weight  low_weight
+#   country)
+#   窄(industry/   keep        keep     low_weight  discard
+#   company/
+#   limited)
+#
+# 单调性：影响范围或影响程度任一维度更高，判定结果绝不会更差。
+#
+# 三档含义：
+#
+# keep       —— 无条件保留，不受分类数量限制
+#               （原来"very_high熔断"就是这张表里的一部分，
+#               不再是叠加在总分之外的补丁规则）
+# low_weight —— 进入低权重候选池，按分类Top15筛选
+# discard    —— 直接丢弃，不进入任何候选池
+#               （只有"窄范围+低程度"这种噪音级组合才会触发）
 # ============================================================
 
 def classify_tier(article):
-    scope = normalize_impact_scope(article.get("impact_scope_level"))
-    degree = normalize_impact_degree(article.get("impact_degree_level"))
 
+    scope = normalize_impact_scope(
+        article.get(
+            "impact_scope_level"
+        )
+    )
+
+
+    degree = normalize_impact_degree(
+        article.get(
+            "impact_degree_level"
+        )
+    )
+
+
+    # very_high：任意范围，无条件保留
     if degree == "very_high":
+
         return "keep"
 
+
+    # high：任意范围，无条件保留
+    #
+    # 重大事件不该因为scope小（比如单个公司）就被过滤掉——
+    # 一家龙头公司的重大利空，scope可能只是company，
+    # 但degree=high已经说明它值得进日报。
     if degree == "high":
+
         return "keep"
+
 
     if degree == "medium":
+
         if scope in BROAD_SCOPES:
+
             return "keep"
+
+
         return "low_weight"
 
+
+    # degree == "low"
+
     if scope in NARROW_SCOPES:
+
         return "discard"
+
 
     return "low_weight"
 
 
+# ============================================================
+# 新闻标准化
+# ============================================================
+
 def prepare_article(article):
-    article = dict(article)
-    article.setdefault("category", DEFAULT_CATEGORY)
-    article.setdefault("event_id", None)
-    article.setdefault("market_relevant", False)
-    article.setdefault("score", 0)
+
+    article = dict(
+        article
+    )
+
+
+    article.setdefault(
+        "category",
+        DEFAULT_CATEGORY
+    )
+
+
+    article.setdefault(
+        "event_id",
+        None
+    )
+
+
+    article.setdefault(
+        "market_relevant",
+        False
+    )
+
+
+    article.setdefault(
+        "score",
+        0
+    )
+
+
     return article
 
 
-def get_event_id(article):
-    event_id = article.get("event_id")
-    if event_id:
-        return normalize_text(event_id).lower()
+# ============================================================
+# AI事件ID标准化
+#
+# 注意：
+#
+# ai_news_analyzer.py 已经统一输出 event_id。
+#
+# 本文件不再使用 event_key。
+# ============================================================
 
-    title = normalize_text(article.get("title", "")).lower()
+def get_event_id(article):
+
+    event_id = article.get(
+        "event_id"
+    )
+
+
+    if event_id:
+
+        return normalize_text(
+            event_id
+        ).lower()
+
+
+    # --------------------------------------------------------
+    # AI没有提供event_id时
+    #
+    # 不主动猜测事件。
+    #
+    # 使用标题作为保守唯一标识，
+    # 避免错误合并不同事件。
+    # --------------------------------------------------------
+
+    title = normalize_text(
+        article.get(
+            "title",
+            ""
+        )
+    ).lower()
+
+
     if title:
-        return f"title:{title}"
+
+        return (
+            f"title:{title}"
+        )
+
 
     return None
 
 
 # ============================================================
-# 同事件去重与合并
+# 同一事件合并
+#
+# 同一事件判断：
+#
+# 由 Groq AI 输出 event_id。
+#
+# 本文件不通过关键词判断。
 # ============================================================
 
 def merge_same_events(articles):
-    groups = defaultdict(list)
+
+    groups = defaultdict(
+        list
+    )
+
 
     for article in articles:
-        event_id = get_event_id(article)
+
+        event_id = get_event_id(
+            article
+        )
+
+
         if event_id is None:
-            event_id = f"article:{id(article)}"
-        groups[event_id].append(article)
+
+            event_id = (
+                f"article:"
+                f"{id(article)}"
+            )
+
+
+        groups[
+            event_id
+        ].append(
+            article
+        )
+
 
     merged = []
 
+
     for event_id, items in groups.items():
+
+        # ----------------------------------------------------
+        # 主新闻：
+        #
+        # 优先评分最高
+        # 分数相同则选择最新
+        # ----------------------------------------------------
+
         items.sort(
+
             key=lambda x: (
-                x.get("score", 0),
-                x.get("published_at") or datetime.min,
+
+                x.get(
+                    "score",
+                    0
+                ),
+
+                x.get(
+                    "published_at"
+                )
+                or datetime.min
+
             ),
-            reverse=True,
+
+            reverse=True
+
         )
 
-        primary = dict(items[0])
+
+        primary = dict(
+            items[0]
+        )
+
+
+        # ----------------------------------------------------
+        # 保留多个真实来源
+        # ----------------------------------------------------
+
         sources = []
+
         urls = []
 
+
         for item in items:
-            source = item.get("source")
-            url = item.get("url")
+
+            source = item.get(
+                "source"
+            )
+
+            url = item.get(
+                "url"
+            )
+
 
             if source and source not in sources:
-                sources.append(source)
+
+                sources.append(
+                    source
+                )
+
+
             if url and url not in urls:
-                urls.append(url)
 
-        primary["sources"] = sources
-        primary["urls"] = urls
-        primary["merged_count"] = len(items)
-        primary["event_id"] = event_id
+                urls.append(
+                    url
+                )
 
-        merged.append(primary)
+
+        primary["sources"] = (
+            sources
+        )
+
+        primary["urls"] = (
+            urls
+        )
+
+        primary["merged_count"] = (
+            len(items)
+        )
+
+        primary["event_id"] = (
+            event_id
+        )
+
+
+        merged.append(
+            primary
+        )
+
 
     return merged
 
 
-def select_low_score_news(articles):
-    category_groups = defaultdict(list)
+# ============================================================
+# 低权重新闻选择
+#
+# 输入：classify_tier() 判定为 low_weight 的候选新闻
+#
+# 每个分类最多 LOW_SCORE_TOP_N_PER_CATEGORY 条，
+# 档位内部按 score（含来源可信度）排序。
+#
+# 不存在总TOP15，是每个分类各自15条。
+# ============================================================
+
+def select_low_score_news(
+    articles
+):
+
+    category_groups = defaultdict(
+        list
+    )
+
 
     for article in articles:
-        category = article.get("category", DEFAULT_CATEGORY)
-        category_groups[category].append(article)
+
+        category = article.get(
+            "category",
+            DEFAULT_CATEGORY
+        )
+
+
+        category_groups[
+            category
+        ].append(
+            article
+        )
+
 
     selected = []
 
+
     for category, items in category_groups.items():
+
         items.sort(
+
             key=lambda x: (
-                x.get("score", 0),
-                x.get("published_at") or datetime.min,
+
+                x.get(
+                    "score",
+                    0
+                ),
+
+                x.get(
+                    "published_at"
+                )
+                or datetime.min
+
             ),
-            reverse=True,
+
+            reverse=True
+
         )
-        selected.extend(items[:LOW_SCORE_TOP_N_PER_CATEGORY])
+
+
+        selected.extend(
+            items[:LOW_SCORE_TOP_N_PER_CATEGORY]
+        )
+
 
     return selected
 
 
+# ============================================================
+# 最终排序
+#
+# 第一优先级：总分
+# 第二优先级：发布时间
+# ============================================================
+
 def sort_news(articles):
+
     return sorted(
+
         articles,
+
         key=lambda x: (
-            x.get("score", 0),
-            x.get("published_at") or datetime.min,
+
+            x.get(
+                "score",
+                0
+            ),
+
+            x.get(
+                "published_at"
+            )
+            or datetime.min
+
         ),
-        reverse=True,
+
+        reverse=True
+
     )
 
 
 # ============================================================
-# 主入口筛选函数
+# 主筛选函数
+#
+# 流程：
+#
+# Groq AI
+#    ↓
+# 过滤非市场新闻
+#    ↓
+# 分类校验
+#    ↓
+# 硬规则评分（仅用于排序展示，不再决定去留）
+#    ↓
+# event_id去重
+#    ↓
+# classify_tier() 分层判定：
+#   keep        → 无条件保留
+#   low_weight  → 各分类Top15
+#   discard     → 丢弃
+#    ↓
+# 最终排序
 # ============================================================
 
-def select_news(analyzed_news):
-    print("\n============================================================")
-    print("开始执行新闻硬规则评分与筛选")
-    print("============================================================")
+def select_news(
+    analyzed_news
+):
+
+    print(
+        "\n============================================================"
+    )
+
+    print(
+        "开始执行新闻硬规则评分与筛选"
+    )
+
+    print(
+        "============================================================"
+    )
+
+
+    # ========================================================
+    # 第一步
+    # 接收 Groq AI 分析结果
+    # ========================================================
 
     market_candidates = []
 
+
     for raw_article in analyzed_news:
-        article = prepare_article(raw_article)
 
-        if not article.get("source"):
+        article = prepare_article(
+            raw_article
+        )
+
+
+        # ----------------------------------------------------
+        # 必须存在真实来源
+        # ----------------------------------------------------
+
+        if not article.get(
+            "source"
+        ):
+
             continue
 
-        if not article.get("url"):
+
+        # ----------------------------------------------------
+        # 必须存在原文链接
+        # ----------------------------------------------------
+
+        if not article.get(
+            "url"
+        ):
+
             continue
 
-        if not article.get("published_at"):
+
+        # ----------------------------------------------------
+        # 必须存在发布时间
+        # ----------------------------------------------------
+
+        if not article.get(
+            "published_at"
+        ):
+
             continue
 
-        if article.get("market_relevant", False) is not True:
+
+        # ----------------------------------------------------
+        # AI判断：
+        #
+        # 是否真正具有金融市场影响
+        # ----------------------------------------------------
+
+        if article.get(
+            "market_relevant",
+            False
+        ) is not True:
+
             continue
 
-        category = article.get("category")
+
+        # ----------------------------------------------------
+        # AI确定的事件分类
+        # ----------------------------------------------------
+
+        category = article.get(
+            "category"
+        )
+
+
         if category not in CATEGORIES:
-            category = DEFAULT_CATEGORY
 
-        article["category"] = category
-        article = calculate_score(article)
-        market_candidates.append(article)
+            category = (
+                DEFAULT_CATEGORY
+            )
 
-    print(f"市场相关候选新闻：{len(market_candidates)}")
 
-    merged_news = merge_same_events(market_candidates)
-    print(f"同一事件合并后：{len(merged_news)}")
+        article["category"] = (
+            category
+        )
+
+
+        # ----------------------------------------------------
+        # 执行硬规则评分
+        # ----------------------------------------------------
+
+        article = calculate_score(
+            article
+        )
+
+
+        market_candidates.append(
+            article
+        )
+
+
+    print(
+        f"市场相关候选新闻："
+        f"{len(market_candidates)}"
+    )
+
+
+    # ========================================================
+    # 第二步
+    # 同一事件合并
+    # ========================================================
+
+    merged_news = merge_same_events(
+        market_candidates
+    )
+
+
+    print(
+        f"同一事件合并后："
+        f"{len(merged_news)}"
+    )
+
+
+    # ========================================================
+    # 第三步
+    # 分层判定：keep / low_weight / discard
+    #
+    # 用同一个 classify_tier() 判定一次分组，
+    # 不用列表成员判断（"in xxx_news"）——
+    # 新闻字典按值比较，内容恰好相同的两条不同新闻
+    # 会被误判为同一条，导致其中一条哪个池都没进去。
+    # ========================================================
 
     keep_news = []
+
     low_weight_candidates = []
+
     discarded_count = 0
 
+
     for article in merged_news:
-        tier = classify_tier(article)
+
+        tier = classify_tier(
+            article
+        )
+
 
         if tier == "keep":
-            keep_news.append(article)
+
+            keep_news.append(
+                article
+            )
+
+
         elif tier == "low_weight":
-            low_weight_candidates.append(article)
+
+            low_weight_candidates.append(
+                article
+            )
+
+
         else:
+
             discarded_count += 1
 
-    low_score_selected = select_low_score_news(low_weight_candidates)
 
-    print(f"高权重新闻（keep，无条件保留）：{len(keep_news)}")
-    print(f"低权重新闻（每类最多{LOW_SCORE_TOP_N_PER_CATEGORY}条，候选池{len(low_weight_candidates)}条）：{len(low_score_selected)}")
-    print(f"直接丢弃（窄范围+低程度）：{discarded_count}")
+    # ========================================================
+    # 第四步
+    # 低权重候选：各分类最多 LOW_SCORE_TOP_N_PER_CATEGORY 条
+    # ========================================================
 
-    final_news = keep_news + low_score_selected
-    final_news = sort_news(final_news)
+    low_score_selected = (
+        select_low_score_news(
+            low_weight_candidates
+        )
+    )
 
-    print(f"最终新闻数量：{len(final_news)}")
-    print("============================================================")
 
-    result = defaultdict(list)
+    print(
+        f"高权重新闻（keep，无条件保留）："
+        f"{len(keep_news)}"
+    )
+
+
+    print(
+        f"低权重新闻（每类最多{LOW_SCORE_TOP_N_PER_CATEGORY}条，"
+        f"候选池{len(low_weight_candidates)}条）："
+        f"{len(low_score_selected)}"
+    )
+
+
+    print(
+        f"直接丢弃（窄范围+低程度）："
+        f"{discarded_count}"
+    )
+
+
+    # ========================================================
+    # 第五步
+    # 最终结果
+    # ========================================================
+
+    final_news = (
+
+        keep_news
+        + low_score_selected
+
+    )
+
+
+    final_news = sort_news(
+        final_news
+    )
+
+
+    print(
+        f"最终新闻数量："
+        f"{len(final_news)}"
+    )
+
+
+    print(
+        "============================================================"
+    )
+
+
+    # ========================================================
+    # 按分类返回
+    # ========================================================
+
+    result = defaultdict(
+        list
+    )
+
+
     for article in final_news:
-        category = article.get("category", DEFAULT_CATEGORY)
-        result[category].append(article)
 
-    return dict(result)
+        category = article.get(
+            "category",
+            DEFAULT_CATEGORY
+        )
 
 
-def score_single_article(article):
-    article = prepare_article(article)
+        result[
+            category
+        ].append(
+            article
+        )
 
-    if article.get("market_relevant", False) is not True:
-        article["market_relevant"] = False
+
+    return dict(
+        result
+    )
+
+
+# ============================================================
+# 单条新闻调试
+# ============================================================
+
+def score_single_article(
+    article
+):
+
+    article = prepare_article(
+        article
+    )
+
+
+    if article.get(
+        "market_relevant",
+        False
+    ) is not True:
+
+        article[
+            "market_relevant"
+        ] = False
+
         return article
 
-    category = article.get("category", DEFAULT_CATEGORY)
-    if category not in CATEGORIES:
-        category = DEFAULT_CATEGORY
 
-    article["category"] = category
-    article = calculate_score(article)
-    article["tier"] = classify_tier(article)
+    category = article.get(
+        "category",
+        DEFAULT_CATEGORY
+    )
+
+
+    if category not in CATEGORIES:
+
+        category = (
+            DEFAULT_CATEGORY
+        )
+
+
+    article["category"] = (
+        category
+    )
+
+
+    article = calculate_score(
+        article
+    )
+
+
+    article["tier"] = classify_tier(
+        article
+    )
+
 
     return article
