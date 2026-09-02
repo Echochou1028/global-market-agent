@@ -7,30 +7,27 @@ import feedparser
 from ai_news_analyzer import analyze_news_list
 from news_scoring import select_news
 
+# ============================================================
+# 全局默认 User-Agent (作为全局兜底)
+# ============================================================
+feedparser.USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
+
 
 # ============================================================
 # 全球金融市场日报
 # 新闻数据采集模块
 #
 # 本文件职责：
-#
-# 1. 从真实新闻源获取新闻
+# 1. 从真实新闻源获取新闻（针对不同源使用定制 Request Headers）
 # 2. 解析新闻基本信息
 # 3. 过滤时间窗口
 # 4. 交给 AI 判断是否真正具有金融市场影响
 # 5. 交给 AI 按“事件本身”进行分类
 # 6. 交给 news_scoring.py 执行最终硬规则
-#
-# news_scoring.py 负责：
-#
-# 1. 影响范围：40分
-# 2. 影响程度：40分
-# 3. 来源可信度：20分
-# 4. 总分：100分
-# 5. 同一事件去重、合并
-# 6. 总分 >40：全部保留
-# 7. 总分 <=40：按分类最多 Top10
-#
 # ============================================================
 
 
@@ -42,24 +39,61 @@ NEWS_WINDOW_HOURS = 36
 
 
 # ============================================================
-# RSS 新闻源
+# RSS 新闻源配置（支持为特定源指定独立的 Request Headers）
 # ============================================================
 
 NEWS_FEEDS = {
-    "CNBC Markets":
-        "https://www.cnbc.com/id/15839135/device/rss/rss.html",
+    "WSJ Markets": {
+        "url": "https://feeds.a.dj.com/rss/RSSMarketsMain.xml",
+        "headers": {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Referer": "https://www.wsj.com/"
+        }
+    },
 
-    "CNBC Finance":
-        "https://www.cnbc.com/id/10000664/device/rss/rss.html",
+    "Reuters Business": {
+        "url": "https://www.reutersagency.com/feed/?best-topics=business-finance&post_type=best",
+        "headers": {
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": "https://www.reuters.com/"
+        }
+    },
 
-    "CNBC World News":
-        "https://www.cnbc.com/id/100727362/device/rss/rss.html",
+    "CNBC Markets": {
+        "url": "https://www.cnbc.com/id/15839135/device/rss/rss.html",
+        "headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"
+        }
+    },
 
-    "CNBC Top News":
-        "https://www.cnbc.com/id/100003114/device/rss/rss.html",
+    "CNBC Finance": {
+        "url": "https://www.cnbc.com/id/10000664/device/rss/rss.html",
+        "headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"
+        }
+    },
 
-    "BBC Business":
-        "https://feeds.bbci.co.uk/news/business/rss.xml",
+    "CNBC World News": {
+        "url": "https://www.cnbc.com/id/100727362/device/rss/rss.html",
+        "headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"
+        }
+    },
+
+    "CNBC Top News": {
+        "url": "https://www.cnbc.com/id/100003114/device/rss/rss.html",
+        "headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"
+        }
+    },
+
+    "BBC Business": {
+        "url": "https://feeds.bbci.co.uk/news/business/rss.xml",
+        "headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"
+        }
+    },
 }
 
 
@@ -70,8 +104,6 @@ NEWS_FEEDS = {
 def clean_text(text):
     """
     清洗新闻文本。
-
-    注意：
     当前主要用于后续新闻处理。
     不改变新闻原始标题、摘要和原文链接。
     """
@@ -119,12 +151,8 @@ def clean_text(text):
 def parse_publish_time(item):
     """
     尝试从 RSS 新闻条目中获取发布时间。
-
-    优先使用 published / updated，
-    如果无法解析，再使用 feedparser 的时间结构。
-
+    优先使用 published / updated，如果无法解析，再使用 feedparser 的时间结构。
     无法确认时间时返回 None。
-    不猜测时间。
     """
 
     candidates = [
@@ -226,15 +254,9 @@ def get_raw_news():
     从真实 RSS 新闻源获取原始新闻。
 
     本函数只负责：
-    - 获取新闻
+    - 获取新闻（传入特定的 Request Headers）
     - 基础字段解析
     - 时间过滤
-
-    不负责：
-    - 判断金融市场影响
-    - 新闻分类
-    - 新闻评分
-    - 新闻数量限制
     """
 
     articles = []
@@ -266,19 +288,35 @@ def get_raw_news():
     )
 
     # ========================================================
-    # 遍历 RSS
+    # 遍历 RSS 配置
     # ========================================================
 
-    for source, url in NEWS_FEEDS.items():
+    for source, config in NEWS_FEEDS.items():
 
         print(
             f"\n正在获取新闻源：{source}"
         )
 
+        # ----------------------------------------------------
+        # 解析配置：兼容字典配置与纯字符串 URL 配置
+        # ----------------------------------------------------
+        if isinstance(config, dict):
+            url = config.get("url", "")
+            headers = config.get("headers", {})
+        else:
+            url = config
+            headers = {}
+
+        if not url:
+            print(f"错误：新闻源 {source} 未配置有效 URL")
+            continue
+
         try:
 
+            # 关键改进：传入 request_headers 定制请求头
             feed = feedparser.parse(
-                url
+                url,
+                request_headers=headers
             )
 
             if getattr(
@@ -288,7 +326,7 @@ def get_raw_news():
             ):
 
                 print(
-                    f"警告：{source} RSS解析异常"
+                    f"警告：{source} RSS解析可能存在格式异常 (bozo=1)"
                 )
 
             source_count = 0
@@ -335,11 +373,6 @@ def get_raw_news():
                     item
                 )
 
-                # ------------------------------------------------
-                # 无法确认时间
-                # 不猜测
-                # ------------------------------------------------
-
                 if not published_at:
                     continue
 
@@ -379,10 +412,7 @@ def get_raw_news():
                     "url":
                         link,
 
-                    # ==================================================
                     # AI 分析字段
-                    # ==================================================
-
                     "category":
                         None,
 
@@ -445,25 +475,10 @@ def get_raw_news():
 def get_news_data():
     """
     获取最终新闻数据。
-
-    数据流程：
-
-    RSS
-      ↓
-    原始新闻
-      ↓
-    Gemini AI 分析
-      ↓
-    市场相关性过滤
-      ↓
-    news_scoring.py
-      ↓
-    最终新闻
     """
 
     # --------------------------------------------------------
-    # 第一步
-    # 从真实 RSS 新闻源获取新闻
+    # 第一步：从真实 RSS 新闻源获取新闻
     # --------------------------------------------------------
 
     raw_news = get_raw_news()
@@ -478,16 +493,7 @@ def get_news_data():
         return []
 
     # --------------------------------------------------------
-    # 第二步
-    # Gemini AI 分析新闻
-    #
-    # AI负责：
-    #
-    # 1. 是否真正具有金融市场影响
-    # 2. 事件本身是什么
-    # 3. 新闻分类
-    # 4. 核心事实
-    # 5. 同一事件识别依据
+    # 第二步：AI 分析新闻
     # --------------------------------------------------------
 
     print(
@@ -517,10 +523,6 @@ def get_news_data():
 
         return []
 
-    # --------------------------------------------------------
-    # AI 返回结果保护
-    # --------------------------------------------------------
-
     if not analyzed_news:
 
         print(
@@ -531,28 +533,13 @@ def get_news_data():
         return []
 
     # --------------------------------------------------------
-    # 第三步
-    # 只保留 AI 判断为真正具有金融市场影响的新闻
-    #
-    # 注意：
-    # 这里不是评分。
-    #
-    # 只是执行：
-    # “是否真正具有金融市场影响”
+    # 第三步：只保留 AI 判断为真正具有金融市场影响的新闻
     # --------------------------------------------------------
 
-    market_news = [
-
-        article
-
-        for article in analyzed_news
-
-        if article.get(
-            "market_relevant",
-            False
-        ) is True
-
-    ]
+    market_news = []
+    for article in analyzed_news:
+        if isinstance(article, dict) and article.get("market_relevant") is True:
+            market_news.append(article)
 
     print(
         "\n============================================================"
@@ -577,22 +564,7 @@ def get_news_data():
         return []
 
     # --------------------------------------------------------
-    # 第四步
-    # 进入 news_scoring.py
-    #
-    # news_scoring.py 执行已经确定的硬规则：
-    #
-    # 影响范围       40
-    # 影响程度       40
-    # 来源可信度     20
-    #
-    # 总分            100
-    #
-    # >40             全部保留
-    #
-    # <=40            按分类 Top10
-    #
-    # 同一事件         去重 / 合并
+    # 第四步：进入 news_scoring.py
     # --------------------------------------------------------
 
     try:
@@ -610,7 +582,7 @@ def get_news_data():
 
         return []
 
-    if not result:
+    if not result or not isinstance(result, dict):
 
         print(
             "\n数据缺失/获取失败："
@@ -620,15 +592,14 @@ def get_news_data():
         return []
 
     # --------------------------------------------------------
-    # 第五步
-    # 将分类结果重新整理成列表
+    # 第五步：整理与排序（带防御防崩溃逻辑）
     # --------------------------------------------------------
 
     final_news = []
 
     for category, news_list in result.items():
 
-        if not news_list:
+        if not news_list or not isinstance(news_list, list):
             continue
 
         for article in news_list:
@@ -639,8 +610,6 @@ def get_news_data():
             ):
                 continue
 
-            # 如果评分模块没有分类，
-            # 使用 AI 已确定的分类
             article["category"] = (
                 article.get(
                     "category"
@@ -652,30 +621,24 @@ def get_news_data():
                 article
             )
 
-    # --------------------------------------------------------
-    # 最终排序
-    # --------------------------------------------------------
+    def safe_score(x):
+        try:
+            return float(x.get("score", 0) or 0)
+        except (ValueError, TypeError):
+            return 0.0
+
+    def safe_time(x):
+        published_at = x.get("published_at")
+        if isinstance(published_at, datetime):
+            return published_at
+        return datetime.min.replace(tzinfo=timezone.utc)
 
     final_news.sort(
-
         key=lambda x: (
-
-            x.get(
-                "score",
-                0
-            ),
-
-            x.get(
-                "published_at"
-            )
-            or datetime.min.replace(
-                tzinfo=timezone.utc
-            )
-
+            safe_score(x),
+            safe_time(x)
         ),
-
         reverse=True
-
     )
 
     print(
@@ -695,7 +658,7 @@ def get_news_data():
 
 
 # ============================================================
-# 测试
+# 测试入口
 # ============================================================
 
 if __name__ == "__main__":
