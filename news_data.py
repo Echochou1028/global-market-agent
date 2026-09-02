@@ -43,20 +43,20 @@ NEWS_WINDOW_HOURS = 36
 # ============================================================
 
 NEWS_FEEDS = {
+    # WSJ 换成稳定公开的 RSS 接口，并补充 Referer
     "WSJ Markets": {
-        "url": "https://feeds.a.dj.com/rss/RSSMarketsMain.xml",
+        "url": "https://feeds.content.dowjones.io/public/rss/mw_topstories", 
         "headers": {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Referer": "https://www.wsj.com/"
         }
     },
-
-    "Reuters Business": {
-        "url": "https://www.reutersagency.com/feed/?best-topics=business-finance&post_type=best",
+    
+   "Reuters Business": {
+        "url": "https://news.google.com/rss/search?q=when:24h+allinurl:reuters.com/business&hl=en-US&gl=US&ceid=US:en",
         "headers": {
-            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Referer": "https://www.reuters.com/"
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         }
     },
 
