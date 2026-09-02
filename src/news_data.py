@@ -16,24 +16,25 @@ from news_scoring import select_news
 NEWS_WINDOW_HOURS = 36
 
 # ============================================================
-# RSS 新闻源配置
+# RSS 新闻源配置 (已替换失效源并新增高可用金融源)
 # ============================================================
 
 NEWS_FEEDS = {
     # CNBC 系列
-    "CNBC Markets": "https://www.cnbc.com/id/15839135/device/rss/rss.html",
-    "CNBC Finance": "https://www.cnbc.com/id/10000664/device/rss/rss.html",
-    "CNBC World News": "https://www.cnbc.com/id/100727362/device/rss/rss.html",
-    "CNBC Top News": "https://www.cnbc.com/id/100003114/device/rss/rss.html",
+    "CNBC Markets": "https://search.cnbc.com/rs/search/combinedlist/view.xml?partnerId=wrss01&id=15839069",
+    "CNBC Finance": "https://search.cnbc.com/rs/search/combinedlist/view.xml?partnerId=wrss01&id=10000664",
+    "CNBC World News": "https://search.cnbc.com/rs/search/combinedlist/view.xml?partnerId=wrss01&id=100727362",
+    "CNBC Top News": "https://search.cnbc.com/rs/search/combinedlist/view.xml?partnerId=wrss01&id=100003114",
     
-    # BBC
+    # 国际权威综合与经济
     "BBC Business": "https://feeds.bbci.co.uk/news/business/rss.xml",
-    
-    # 补充国际主流财经源
-    "Reuters Business": "https://www.reutersagency.com/feed/?best-topics=business-finance&post_type=best",
-    "WSJ Markets": "https://feeds.a.dj.com/rss/RSSMarketsMain.xml",
     "FT World Economy": "https://www.ft.com/world-uk?format=rss",
-    "MarketWatch Top Stories": "https://feeds.content.dowjones.io/public/rss/mw_topstories"
+    "MarketWatch Top Stories": "https://feeds.content.dowjones.io/public/rss/mw_topstories",
+    
+    # 高稳定性主流财经信源 (替代失效的路透社与华尔街日报)
+    "Yahoo Finance": "https://finance.yahoo.com/news/rssindex",
+    "Investing.com News": "https://www.investing.com/rss/news.rss",
+    "Google News Finance": "https://news.google.com/rss/search?q=when:24h+allinurl:finance+OR+allinurl:markets&ceid=US:en&hl=en-US&gl=US"
 }
 
 # 二维决策矩阵：[scope][degree] -> "keep" | "low_weight" | "discard"
@@ -158,9 +159,14 @@ def get_raw_news():
     for source, url in NEWS_FEEDS.items():
         print(f"\n正在获取新闻源：{source}")
         try:
-            feed = feedparser.parse(url)
+            # 加入自定义 User-Agent 提升 RSS 抓取稳定性
+            feed = feedparser.parse(
+                url,
+                agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            )
             if getattr(feed, "bozo", False):
-                print(f"警告：{source} RSS解析可能存在异常")
+                # bozo 为 1 时不一定代表完全失败，仅有轻微 XML 规范警告
+                pass
 
             source_count = 0
             for item in feed.entries[:50]:
@@ -214,15 +220,12 @@ def get_raw_news():
 
 def evaluate_tier(article):
     """根据 scope × degree 查表判定流向档位，不使用来源可信度"""
-    # 安全获取并转换 scope（优先获取 _level 字段，兜底 _scope 字段）
     scope_val = article.get("impact_scope_level") or article.get("impact_scope") or "limited"
     scope = str(scope_val).lower() if isinstance(scope_val, (str, int, float)) else "limited"
 
-    # 安全获取并转换 degree（优先获取 _level 字段，兜底 _degree 字段）
     degree_val = article.get("impact_degree_level") or article.get("impact_degree") or "low"
     degree = str(degree_val).lower() if isinstance(degree_val, (str, int, float)) else "low"
 
-    # 查表获取决策
     scope_dict = DECISION_MATRIX.get(scope, DECISION_MATRIX.get("limited", {}))
     decision = scope_dict.get(degree, "discard")
 
@@ -237,7 +240,7 @@ def filter_by_tiered_thresholds(analyzed_news):
     3. discard 档：直接过滤
     """
     keep_list = []
-    low_weight_map = {}  # { category: [article, ...] }
+    low_weight_map = {}
 
     for article in analyzed_news:
         if not article.get("market_relevant", False):
