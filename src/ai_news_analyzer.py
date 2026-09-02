@@ -715,4 +715,363 @@ def validate_ai_results(results, expected_ids):
     if not isinstance(results, list):
         raise ValueError("Groq返回结果不是数组")
 
-    if len(
+    if len(results) != len(expected_ids):
+        raise ValueError(
+            "Groq返回数量错误："
+            f"期望 {len(expected_ids)} 条，实际 {len(results)} 条"
+        )
+
+    actual_ids = set()
+    for item in results:
+        if not isinstance(item, dict):
+            raise ValueError("Groq返回结果中存在非对象")
+        if "id" not in item:
+            raise ValueError("Groq返回结果缺少id")
+
+        item_id = str(item["id"])
+        if item_id in actual_ids:
+            raise ValueError(f"Groq返回重复id：{item_id}")
+        actual_ids.add(item_id)
+
+    expected_id_set = {str(x) for x in expected_ids}
+    if actual_ids != expected_id_set:
+        raise ValueError(
+            "Groq返回ID不完整或存在错误："
+            f"期望={sorted(expected_id_set)}, 实际={sorted(actual_ids)}"
+        )
+
+    return True
+
+
+# ============================================================
+# 请求 Groq
+# ============================================================
+
+def call_groq(client, messages, max_completion_tokens, use_reasoning_effort=True):
+    kwargs = {
+        "model": GROQ_MODEL,
+        "messages": messages,
+        "temperature": 0,
+        "response_format": {"type": "json_object"},
+        "max_completion_tokens": max_completion_tokens
+    }
+
+    if use_reasoning_effort:
+        kwargs["reasoning_effort"] = "low"
+
+    return client.chat.completions.create(**kwargs)
+
+
+# ============================================================
+# Groq 免费额度限速
+# ============================================================
+
+def wait_for_rate_limit(total_tokens_used, elapsed_seconds):
+    target_seconds = (
+        total_tokens_used / GROQ_TPM_LIMIT * 60 * RATE_LIMIT_SAFETY_FACTOR
+    )
+    target_seconds = max(target_seconds, MIN_BATCH_INTERVAL_SECONDS)
+    sleep_seconds = target_seconds - elapsed_seconds
+
+    if sleep_seconds > 0:
+        print(
+            f"限速等待：{sleep_seconds:.1f}秒 "
+            f"（本批消耗{total_tokens_used} Token，"
+            f"TPM限制{GROQ_TPM_LIMIT}，已用时{elapsed_seconds:.1f}秒）"
+        )
+        time.sleep(sleep_seconds)
+    else:
+        print(
+            f"本批已用时{elapsed_seconds:.1f}秒，"
+            f"超过限速所需间隔，无需额外等待"
+        )
+
+
+# ============================================================
+# 单批请求
+# ============================================================
+
+def request_groq_batch(client, articles, batch_number):
+    prompt = build_batch_prompt(articles)
+    expected_ids = [article["id"] for article in articles]
+    input_tokens, output_tokens, total_tokens = estimate_batch_tokens(articles)
+    last_error = None
+    reasoning_effort_supported = True
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        print(f"Groq第{batch_number}批：第{attempt}次请求")
+        print(f"本次max_completion_tokens：{output_tokens}")
+
+        try:
+            messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt}
+            ]
+
+            try:
+                response = call_groq(
+                    client,
+                    messages,
+                    output_tokens,
+                    use_reasoning_effort=reasoning_effort_supported
+                )
+            except TypeError as e:
+                error_text = str(e)
+                if "reasoning_effort" in error_text:
+                    print(
+                        "当前OpenAI SDK/Groq接口不支持 reasoning_effort，"
+                        "自动降级为不传该参数。"
+                    )
+                    reasoning_effort_supported = False
+                    response = call_groq(
+                        client,
+                        messages,
+                        output_tokens,
+                        use_reasoning_effort=False
+                    )
+                else:
+                    raise
+
+            finish_reason = response.choices[0].finish_reason
+            usage = response.usage
+            usage_total_tokens = usage.total_tokens if usage else total_tokens
+
+            if usage:
+                print(
+                    f"实际Token消耗：输入{usage.prompt_tokens} "
+                    f"输出{usage.completion_tokens} "
+                    f"总计{usage.total_tokens}"
+                )
+
+            print(f"finish_reason：{finish_reason}")
+
+            if finish_reason == "length":
+                raise ValueError(
+                    "输出被截断（finish_reason=length），"
+                    f"当前max_completion_tokens={output_tokens}不足以覆盖"
+                    "推理+完整JSON输出，需要增大预算或减小批量"
+                )
+
+            text = response.choices[0].message.content
+            if not text:
+                raise ValueError("Groq返回内容为空")
+
+            text = clean_json_text(text)
+            result = json.loads(text)
+            results = extract_results(result)
+
+            if results is None:
+                raise ValueError(
+                    "Groq返回JSON对象，但没有results、articles或data数组"
+                )
+
+            validate_ai_results(results, expected_ids)
+            return results, {"total_tokens": usage_total_tokens}
+
+        except Exception as e:
+            last_error = e
+            print(f"Groq第{batch_number}批失败：{e}")
+            if attempt < MAX_RETRIES:
+                print(f"将在{RETRY_DELAY_SECONDS}秒后重试...")
+                time.sleep(RETRY_DELAY_SECONDS)
+
+    raise RuntimeError(
+        f"Groq第{batch_number}批达到最大重试次数：{last_error}"
+    )
+
+
+# ============================================================
+# AI失败标记兜底
+# ============================================================
+
+def mark_analysis_failed(articles):
+    failed = []
+    for article in articles:
+        item = dict(article)
+        item["market_relevant"] = False
+        item["ai_analysis_failed"] = True
+        failed.append(item)
+    return failed
+
+
+# ============================================================
+# 合并批次
+# ============================================================
+
+def merge_batch_results(batch_results_list):
+    merged = []
+    for batch_results in batch_results_list:
+        if not isinstance(batch_results, list):
+            continue
+        merged.extend(batch_results)
+    return merged
+
+
+# ============================================================
+# 批量分析新闻
+# ============================================================
+
+def analyze_news_list(articles):
+    if not articles:
+        return []
+
+    print("\n============================================================")
+    print("开始使用 Groq AI 批量分析新闻事件")
+    print(f"待分析新闻：{len(articles)} 条")
+    print("分析模式：稳定小批量 + 动态Token + 免费额度限速")
+    print(f"单批最大新闻数：{MAX_ARTICLES_PER_BATCH}")
+    print(f"Token安全阈值：{TOKEN_SAFETY_LIMIT}")
+    print(f"模型：{GROQ_MODEL}")
+    print("reasoning_effort：low")
+    print(f"Groq免费额度TPM限制：{GROQ_TPM_LIMIT}")
+    print("============================================================")
+
+    client = get_client()
+
+    prepared_articles = []
+    for global_id, article in enumerate(articles, 1):
+        prepared_articles.append({
+            "id": global_id,
+            "title": article.get("title", ""),
+            "summary": article.get("summary", ""),
+            "source": article.get("source", ""),
+            "url": article.get("url", "")
+        })
+
+    batches = build_batches(prepared_articles)
+    print(f"自动生成分析批次：{len(batches)} 批")
+
+    for batch_index, batch in enumerate(batches, 1):
+        input_tokens, output_tokens, total_tokens = estimate_batch_tokens(batch)
+        print(
+            f"  第{batch_index}批：{len(batch)}条，"
+            f"预计输入Token：{input_tokens}，"
+            f"动态输出Token：{output_tokens}，"
+            f"预计总Token：{total_tokens}"
+        )
+
+    all_batch_results = []
+    total_batches = len(batches)
+
+    for batch_index, batch in enumerate(batches, 1):
+        print("\n------------------------------------------------------------")
+        print(f"正在分析批次：{batch_index}/{total_batches}")
+        print(f"本批新闻数量：{len(batch)}")
+
+        input_tokens, output_tokens, total_tokens = estimate_batch_tokens(batch)
+        print(f"预计输入Token：{input_tokens}")
+        print(f"动态输出Token：{output_tokens}")
+        print(f"预计总Token：{total_tokens}")
+        print("------------------------------------------------------------")
+
+        batch_start_time = time.time()
+
+        try:
+            batch_results, usage_info = request_groq_batch(client, batch, batch_index)
+            
+            # 校验当前批次
+            expected_ids = [article["id"] for article in batch]
+            validate_ai_results(batch_results, expected_ids)
+
+            all_batch_results.append(batch_results)
+            print(f"第{batch_index}批分析成功：{len(batch_results)}条")
+
+            # 批次间限速
+            if batch_index < total_batches:
+                elapsed_seconds = time.time() - batch_start_time
+                wait_for_rate_limit(usage_info["total_tokens"], elapsed_seconds)
+
+        except Exception as e:
+            error_msg = str(e)
+            print("\n============================================================")
+            print(f"Groq第{batch_index}/{total_batches}批分析失败：{error_msg}")
+            
+            # 触发 Rate Limit (429/TPD) 时保留已成功数据
+            if "rate_limit_exceeded" in error_msg or "429" in error_msg or "rate limit" in error_msg.lower():
+                print("【触发 Groq 限额限制 (TPD/TPM)】已停止后续批次处理。")
+                print(f"【降级策略生效】保留前 {len(all_batch_results)} 批已成功分析的数据继续生成日报。")
+            else:
+                print("【批次异常】保留此前成功处理的批次数据，终止后续分析。")
+            print("============================================================")
+            break  # 终止后续批次循环，保留已合并结果
+
+    # 合并已成功处理的批次
+    merged_results = merge_batch_results(all_batch_results)
+
+    # 建立已处理 AI 结果的索引 map
+    result_map = {}
+    for item in merged_results:
+        if isinstance(item, dict) and "id" in item:
+            result_map[str(item["id"])] = item
+
+    analyzed = []
+    success_count = 0
+
+    for index, original_article in enumerate(articles, 1):
+        str_id = str(index)
+        article = dict(original_article)
+
+        if str_id in result_map:
+            ai_result = result_map[str_id]
+            article.update({
+                "market_relevant": bool(ai_result.get("market_relevant", False)),
+                "event_type": ai_result.get("event_type", ""),
+                "category": ai_result.get("category", "公司、行业与研报"),
+                "core_fact": ai_result.get("core_fact", ""),
+                "market_impact_reason": ai_result.get("market_impact_reason", ""),
+                "event_id": ai_result.get("event_id", ""),
+                "impact_scope_level": ai_result.get("impact_scope_level", "limited"),
+                "impact_degree_level": ai_result.get("impact_degree_level", "low"),
+                "ai_analysis_failed": False
+            })
+            success_count += 1
+        else:
+            # 未被 AI 分析到的新闻填充默认兜底字段
+            article.update({
+                "market_relevant": False,
+                "event_type": "",
+                "category": "公司、行业与研报",
+                "core_fact": article.get("summary", ""),
+                "market_impact_reason": "",
+                "event_id": "",
+                "impact_scope_level": "limited",
+                "impact_degree_level": "low",
+                "ai_analysis_failed": True
+            })
+
+        analyzed.append(article)
+
+    # 输出调试打印信息
+    print("\n============================================================")
+    print(f" Groq 批量新闻分析完成：共 {len(analyzed)} 条，成功分析 {success_count} 条")
+    print("============================================================")
+
+    return analyzed
+
+
+# ============================================================
+# 单条新闻分析
+# ============================================================
+
+def analyze_news(article):
+    results = analyze_news_list([article])
+    if results:
+        return results[0]
+    return {"market_relevant": False, "ai_analysis_failed": True}
+
+
+# ============================================================
+# 测试入口
+# ============================================================
+
+if __name__ == "__main__":
+    test_article = {
+        "title": "Fed keeps interest rates unchanged",
+        "summary": "The Federal Reserve kept interest rates unchanged.",
+        "source": "CNBC Finance",
+        "url": "[https://example.com](https://example.com)"
+    }
+
+    result = analyze_news(test_article)
+    print("\n测试结果：")
+    print(json.dumps(result, ensure_ascii=False, indent=4))
