@@ -214,10 +214,16 @@ def get_raw_news():
 
 def evaluate_tier(article):
     """根据 scope × degree 查表判定流向档位，不使用来源可信度"""
-    scope = (article.get("impact_scope") or "limited").lower()
-    degree = (article.get("impact_degree") or "low").lower()
+    # 安全获取并转换 scope（优先获取 _level 字段，兜底 _scope 字段）
+    scope_val = article.get("impact_scope_level") or article.get("impact_scope") or "limited"
+    scope = str(scope_val).lower() if isinstance(scope_val, (str, int, float)) else "limited"
 
-    scope_dict = DECISION_MATRIX.get(scope, DECISION_MATRIX["limited"])
+    # 安全获取并转换 degree（优先获取 _level 字段，兜底 _degree 字段）
+    degree_val = article.get("impact_degree_level") or article.get("impact_degree") or "low"
+    degree = str(degree_val).lower() if isinstance(degree_val, (str, int, float)) else "low"
+
+    # 查表获取决策
+    scope_dict = DECISION_MATRIX.get(scope, DECISION_MATRIX.get("limited", {}))
     decision = scope_dict.get(degree, "discard")
 
     return decision
