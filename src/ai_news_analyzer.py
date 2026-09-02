@@ -24,6 +24,13 @@ from openai import OpenAI
 
 GROQ_MODEL = "openai/gpt-oss-120b"
 
+# 备选免费模型列表（当首选模型触发 429 TPD 限制时按顺序自动降级切换）
+GROQ_MODELS = [
+    GROQ_MODEL,
+    "llama-3.3-70b-versatile",
+    "llama-3.1-8b-instant"
+]
+
 
 # ============================================================
 # 批次控制
