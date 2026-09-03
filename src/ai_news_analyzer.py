@@ -75,7 +75,12 @@ MAX_RETRIES = 2
 RETRY_DELAY_SECONDS = 2
 
 GROQ_TPM_LIMIT = 8000
-RATE_LIMIT_SAFETY_FACTOR = 1.1
+# 已知事件清单会让批次越往后input token越多（最后几批可能比
+# 最初几批多出1000-2000+ token），加上上次实测15批里有5批已经
+# 撞了TPM——1.1的余量偏紧，上调到1.4留出更多缓冲。
+# 就算撞了限流也有gpt-oss-20b兜底，不是致命的，
+# 但余量更大能减少不必要的429和重试次数。
+RATE_LIMIT_SAFETY_FACTOR = 1.4
 MIN_BATCH_INTERVAL_SECONDS = 10
 
 
@@ -111,7 +116,7 @@ SYSTEM_PROMPT = """你是一个金融市场新闻分析引擎。
    - 公司、行业与研报 (重要财报/并购/科技半导体AI产业/重磅研报)
 3. core_fact (string): 严谨客观总结输入新闻中的核心事实，禁止编造。
 4. market_impact_reason (string): 说明为何影响市场。
-5. event_id (string): 简短的核心事件统一标识符，用于归并同类报道。
+5. event_id (string): 简短的核心事件统一标识符，用于归并同类报道。如果本次请求提供了"已知事件清单"，且这批新闻里有描述同一事件的报道，必须复用清单里给出的event_id，禁止为同一事件重新生成新的event_id；只有确认是清单里没有的全新事件时，才创建新的event_id。
 6. impact_scope_level (string): global / multi_region / regional / country / industry / company / limited
 7. impact_degree_level (string): very_high / high / medium / low
 
@@ -154,9 +159,12 @@ def calculate_output_tokens(article_count):
     return min(dynamic_tokens, MAX_OUTPUT_TOKEN_RESERVE)
 
 
-def estimate_batch_tokens(articles):
+def estimate_batch_tokens(articles, known_events=None):
     prompt_overhead = estimate_tokens(SYSTEM_PROMPT) + 300
-    input_tokens = prompt_overhead + sum(estimate_article_tokens(a) for a in articles)
+    known_events_tokens = 0
+    if known_events:
+        known_events_tokens = estimate_tokens(json.dumps(known_events, ensure_ascii=False))
+    input_tokens = prompt_overhead + known_events_tokens + sum(estimate_article_tokens(a) for a in articles)
     output_tokens = calculate_output_tokens(len(articles))
     return input_tokens, output_tokens, input_tokens + output_tokens
 
@@ -181,10 +189,24 @@ def build_batches(articles):
     return batches
 
 
-def build_batch_prompt(articles):
+def build_batch_prompt(articles, known_events=None):
     articles_json = json.dumps(articles, ensure_ascii=False)
     count = len(articles)
-    return f"请分析以下全部 {count} 条新闻，返回包含全部 {count} 条结果的 JSON 对象：\n\n{articles_json}"
+
+    known_events_section = ""
+    if known_events:
+        known_events_json = json.dumps(known_events, ensure_ascii=False)
+        known_events_section = (
+            f"\n\n已知事件清单（今天已经识别过的事件，如果本批新闻里有属于"
+            f"以下某个事件的报道，必须复用对应的event_id，不要新起一个）：\n\n"
+            f"{known_events_json}"
+        )
+
+    return (
+        f"请分析以下全部 {count} 条新闻，返回包含全部 {count} 条结果的 JSON 对象："
+        f"\n\n{articles_json}"
+        f"{known_events_section}"
+    )
 
 
 def clean_json_text(text):
@@ -256,7 +278,7 @@ def execute_chat_completion(client, model_name, messages, max_tokens):
 # 两个模型都失败 → 抛异常，交给上层判定整次分析失败。
 # ============================================================
 
-def request_batch_with_fallback(client, articles, batch_number):
+def request_batch_with_fallback(client, articles, batch_number, known_events=None):
 
     # ========================================================
     # 批内本地编号
@@ -282,9 +304,9 @@ def request_batch_with_fallback(client, articles, batch_number):
         local_article["id"] = local_id
         local_articles.append(local_article)
 
-    prompt = build_batch_prompt(local_articles)
+    prompt = build_batch_prompt(local_articles, known_events)
     expected_local_ids = list(range(1, len(articles) + 1))
-    _, output_tokens, total_tokens = estimate_batch_tokens(local_articles)
+    _, output_tokens, total_tokens = estimate_batch_tokens(local_articles, known_events)
     last_error = None
 
     messages = [
@@ -422,14 +444,40 @@ def analyze_news_list(articles):
 
     all_batch_results = []
 
+    # ========================================================
+    # 跨批次已知事件清单
+    #
+    # 每处理完一批，把这批新识别出的事件（event_id + 简短
+    # event_type）加进这个清单，后续批次的prompt都会带上它，
+    # 让AI在遇到同一事件的不同报道时复用已有event_id，
+    # 而不是每批各起各的、导致同一事件在最终日报里重复出现。
+    # ========================================================
+
+    known_events = []
+    seen_event_ids = set()
+
     for batch_index, batch in enumerate(batches, 1):
         print(f"--- 处理批次 [{batch_index}/{total_batches}] (包含 {len(batch)} 条新闻) ---")
         batch_start_time = time.time()
 
         try:
-            batch_results, used_tokens = request_batch_with_fallback(client, batch, batch_index)
+            batch_results, used_tokens = request_batch_with_fallback(
+                client, batch, batch_index, known_events
+            )
             all_batch_results.append(batch_results)
             print(f"批次 [{batch_index}] 分析成功 ({len(batch_results)} 条)")
+
+            # 把这批新出现的事件登记进已知事件清单，供后续批次复用
+            for item in batch_results:
+                if not isinstance(item, dict):
+                    continue
+                eid = item.get("event_id")
+                if eid and eid not in seen_event_ids:
+                    seen_event_ids.add(eid)
+                    known_events.append({
+                        "event_id": eid,
+                        "event_type": item.get("event_type", "")[:60]
+                    })
 
             if batch_index < total_batches:
                 elapsed = time.time() - batch_start_time
