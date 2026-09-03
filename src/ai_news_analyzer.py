@@ -257,9 +257,34 @@ def execute_chat_completion(client, model_name, messages, max_tokens):
 # ============================================================
 
 def request_batch_with_fallback(client, articles, batch_number):
-    prompt = build_batch_prompt(articles)
-    expected_ids = [article["id"] for article in articles]
-    _, output_tokens, total_tokens = estimate_batch_tokens(articles)
+
+    # ========================================================
+    # 批内本地编号
+    #
+    # 不管这批文章在全局id里是第几号（比如121-130），
+    # 发给AI的时候永远从1开始编号，拿到结果后再换算回
+    # 真实的全局id。
+    #
+    # 起因：openai/gpt-oss-20b处理"起始编号不是1"的批次时，
+    # 出现过擅自把id重新编号成1..N的情况（两次重试结果一致，
+    # 是系统性行为，不是偶然），导致返回id跟预期对不上，
+    # 整批判定失败。用本地编号1..N提问，结果再换算回全局id，
+    # 从根上绕开这个问题——不用赌模型会不会乖乖遵守
+    # "必须保留原id"这条指令。
+    # ========================================================
+
+    local_to_global_id = {}
+    local_articles = []
+
+    for local_id, article in enumerate(articles, 1):
+        local_to_global_id[local_id] = article["id"]
+        local_article = dict(article)
+        local_article["id"] = local_id
+        local_articles.append(local_article)
+
+    prompt = build_batch_prompt(local_articles)
+    expected_local_ids = list(range(1, len(articles) + 1))
+    _, output_tokens, total_tokens = estimate_batch_tokens(local_articles)
     last_error = None
 
     messages = [
@@ -290,7 +315,17 @@ def request_batch_with_fallback(client, articles, batch_number):
                 if results is None:
                     raise ValueError("未找到 results 数组")
 
-                validate_ai_results(results, expected_ids)
+                validate_ai_results(results, expected_local_ids)
+
+                # 换算回全局id，让下游合并逻辑不用感知本地编号这层
+                for item in results:
+                    if isinstance(item, dict) and "id" in item:
+                        try:
+                            local_id = int(item["id"])
+                        except (TypeError, ValueError):
+                            local_id = None
+                        if local_id in local_to_global_id:
+                            item["id"] = local_to_global_id[local_id]
 
                 if usage:
                     print(
@@ -304,11 +339,17 @@ def request_batch_with_fallback(client, articles, batch_number):
                 err_str = str(e).lower()
                 print(f"模型【{model_name}】请求失败: {e}")
 
-                # 429/404/400/decommissioned：模型本身不可用，
-                # 立即切下一个模型，不浪费剩余重试次数
+                # 429/rate_limit：额度耗尽 / 404/model_not_found：模型不存在
+                # / decommissioned：模型已下线 —— 这几种是模型本身不可用，
+                # 立即切下一个模型，不浪费剩余重试次数。
+                #
+                # 注意：不能用裸的"400"做判断——模型偶发生成的JSON
+                # 格式错误（json_validate_failed）也是400，但这是随机的
+                # 一次性抖动，不是模型不可用，应该在同一模型上重试，
+                # 而不是直接放弃这个模型切去更弱的备用模型。
                 if any(
                     k in err_str
-                    for k in ["429", "rate_limit", "404", "model_not_found", "400", "decommissioned"]
+                    for k in ["429", "rate_limit", "404", "model_not_found", "decommissioned"]
                 ):
                     print("【模型熔断】检测到不可用或被限流，立即切换下一模型...")
                     break
