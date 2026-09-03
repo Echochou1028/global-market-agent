@@ -453,6 +453,60 @@ def normalize_impact_degree(value):
 
 
 # ============================================================
+# 标准化内容性质
+#
+# event（具体事件）/ commentary（评论分析类软文）。
+#
+# 缺失时默认event——保守默认，不因为字段缺失就误伤，
+# 跟这个文件里其他字段的默认值取向一致。
+# ============================================================
+
+def normalize_content_nature(value):
+
+    if value is None:
+
+        return "event"
+
+
+    value = str(
+        value
+    ).strip().lower()
+
+
+    aliases = {
+
+        "event":
+            "event",
+
+        "news_event":
+            "event",
+
+        "fact":
+            "event",
+
+
+        "commentary":
+            "commentary",
+
+        "opinion":
+            "commentary",
+
+        "analysis":
+            "commentary",
+
+        "analyst_commentary":
+            "commentary",
+
+    }
+
+
+    return aliases.get(
+        value,
+        "event"
+    )
+
+
+# ============================================================
 # 影响范围评分
 # ============================================================
 
@@ -598,21 +652,28 @@ def calculate_score(article):
 # 这里做得更彻底：来源干脆不参与"要不要保留"的判断。
 #
 #                  very_high   high     medium      low
-#   广(global/     keep        keep     keep        low_weight
+# 分层判定表（v4：加入content_nature维度）
+#
+#                  very_high   high     medium      low
+#   广(global/     keep        keep*    keep*       low_weight
 #   multi_region)
-#   中(regional/   keep        keep     low_weight  low_weight
+#   中(regional/   keep        keep*    low_weight  low_weight
 #   country)
-#   窄(industry/   keep        keep     low_weight  discard
+#   窄(industry/   keep        keep*    low_weight  discard
 #   company/
 #   limited)
 #
-# 单调性：影响范围或影响程度任一维度更高，判定结果绝不会更差。
+#   * 标了星号的格子，如果content_nature=commentary（评论/分析类
+#     软文，不是具体发生的事件），降级为low_weight，不再无条件保留。
+#     very_high这一行不受影响——真正的黑天鹅级别，不该因为
+#     报道形式是评论就被压低。
+#
+# 单调性：影响范围或影响程度任一维度更高，判定结果绝不会更差
+#（content_nature=commentary时的降级例外）。
 #
 # 三档含义：
 #
 # keep       —— 无条件保留，不受分类数量限制
-#               （原来"very_high熔断"就是这张表里的一部分，
-#               不再是叠加在总分之外的补丁规则）
 # low_weight —— 进入低权重候选池，按分类Top15筛选
 # discard    —— 直接丢弃，不进入任何候选池
 #               （只有"窄范围+低程度"这种噪音级组合才会触发）
@@ -634,25 +695,40 @@ def classify_tier(article):
     )
 
 
-    # very_high：任意范围，无条件保留
+    content_nature = normalize_content_nature(
+        article.get(
+            "content_nature"
+        )
+    )
+
+    is_commentary = content_nature == "commentary"
+
+
+    # very_high：任意范围，无条件保留，不受content_nature影响——
+    # 真正的黑天鹅级别不该因为报道形式是评论就被压低
     if degree == "very_high":
 
         return "keep"
 
 
-    # high：任意范围，无条件保留
-    #
-    # 重大事件不该因为scope小（比如单个公司）就被过滤掉——
-    # 一家龙头公司的重大利空，scope可能只是company，
-    # 但degree=high已经说明它值得进日报。
+    # high：默认无条件保留，但如果是评论/分析类软文
+    # （不是具体发生的事件，只是有人对某个话题发表看法），
+    # 降级为低权重池排队，不再自动进日报——
+    # 这是本版新增的过滤，专门针对"分析师觉得XX能翻倍"
+    # 这类哪怕话题热门、AI给的程度评级也偏高的软文噪音。
     if degree == "high":
+
+        if is_commentary:
+
+            return "low_weight"
+
 
         return "keep"
 
 
     if degree == "medium":
 
-        if scope in BROAD_SCOPES:
+        if scope in BROAD_SCOPES and not is_commentary:
 
             return "keep"
 
@@ -684,6 +760,12 @@ def prepare_article(article):
     article.setdefault(
         "category",
         DEFAULT_CATEGORY
+    )
+
+
+    article.setdefault(
+        "content_nature",
+        "event"
     )
 
 
@@ -1341,3 +1423,4 @@ def score_single_article(
 
 
     return article
+    
