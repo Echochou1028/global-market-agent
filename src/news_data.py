@@ -40,12 +40,15 @@ NEWS_FEEDS = {
     # 官方/监管一手信源（已核实真实可用）
     "Federal Reserve": "https://www.federalreserve.gov/feeds/press_all.xml",
     "SEC": "https://www.sec.gov/news/pressreleases.rss",
+    "BIS": "https://www.bis.org/doclist/all_pressrels.rss",
 
-    # CNBC 系列
-    "CNBC Markets": "https://search.cnbc.com/rs/search/combinedlist/view.xml?partnerId=wrss01&id=15839069",
-    "CNBC Finance": "https://search.cnbc.com/rs/search/combinedlist/view.xml?partnerId=wrss01&id=10000664",
-    "CNBC World News": "https://search.cnbc.com/rs/search/combinedlist/view.xml?partnerId=wrss01&id=100727362",
-    "CNBC Top News": "https://search.cnbc.com/rs/search/combinedlist/view.xml?partnerId=wrss01&id=100003114",
+    # CNBC 系列（退回本对话最早验证过稳定的id格式——
+    # search.cnbc.com/combinedlist 格式最近两次运行全部返回0条，
+    # 不像是"没新闻"，更像是这个接口本身不稳定/已变化）
+    "CNBC Markets": "https://www.cnbc.com/id/15839135/device/rss/rss.html",
+    "CNBC Finance": "https://www.cnbc.com/id/10000664/device/rss/rss.html",
+    "CNBC World News": "https://www.cnbc.com/id/100727362/device/rss/rss.html",
+    "CNBC Top News": "https://www.cnbc.com/id/100003114/device/rss/rss.html",
 
     # 国际权威综合与经济
     "BBC Business": "https://feeds.bbci.co.uk/news/business/rss.xml",
@@ -55,11 +58,14 @@ NEWS_FEEDS = {
     # 高稳定性主流财经信源（替代失效的Reuters Business与WSJ Markets）
     "Yahoo Finance": "https://finance.yahoo.com/news/rssindex",
     "Investing.com News": "https://www.investing.com/rss/news.rss",
-    "Google News Finance": "https://news.google.com/rss/search?q=when:24h+allinurl:finance+OR+allinurl:markets&ceid=US:en&hl=en-US&gl=US",
+    # Google News Finance 已移除：q参数里 allinurl: 不是Google News
+    # 搜索的标准操作符，AND/OR混用又没加括号，语法本身就有问题，
+    # 这也是它一直返回0条的更可能原因（不是"没新闻"）。
+    # 内容跟Yahoo Finance/Investing.com高度重叠，先不修，直接去掉。
 
-    # 待核实：U.S. Treasury / BEA / NYSE / CME / IMF / BIS / World Bank
-    # 已确认Treasury有RSS机制，但具体XML地址还没核实到，
-    # 下一轮查证后再加，不猜URL。
+    # 待核实：U.S. Treasury / BEA / NYSE / CME / IMF / World Bank
+    # BIS已确认加入。Treasury确认有RSS机制但具体地址未核实；
+    # BEA/NYSE/CME/IMF/World Bank这轮还没查到明确地址，不猜URL。
 }
 
 
@@ -126,6 +132,7 @@ def format_publish_time(dt):
 
 def get_raw_news():
     articles = []
+    seen_urls = set()
     since = datetime.now(timezone.utc) - timedelta(hours=NEWS_WINDOW_HOURS)
 
     print("\n============================================================")
@@ -154,9 +161,22 @@ def get_raw_news():
                 if not title or not link:
                     continue
 
+                # --------------------------------------------------------
+                # URL去重：同一篇文章不该被喂给AI两次。
+                #
+                # AI按批次独立分析，跨批次没有记忆，无法保证给同一篇
+                # 文章两次生成一致的event_id，靠AI去重不可靠——
+                # 这一步必须在AI分析之前、用最朴素的方式做掉。
+                # --------------------------------------------------------
+
+                if link in seen_urls:
+                    continue
+
                 published_at = parse_publish_time(item)
                 if not published_at or published_at < since:
                     continue
+
+                seen_urls.add(link)
 
                 article = {
                     "title": title,
