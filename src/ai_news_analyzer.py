@@ -114,11 +114,15 @@ SYSTEM_PROMPT = """你是一个金融市场新闻分析引擎。
    - 宏观、政策与地缘 (央行/利率/通胀/就业/GDP/关税/地缘政治)
    - 市场与资产 (股市大盘/大宗商品/外汇/虚拟货币剧烈波动)
    - 公司、行业与研报 (重要财报/并购/科技半导体AI产业/重磅研报)
-3. core_fact (string): 严谨客观总结输入新闻中的核心事实，禁止编造。
-4. market_impact_reason (string): 说明为何影响市场。
-5. event_id (string): 简短的核心事件统一标识符，用于归并同类报道。如果本次请求提供了"已知事件清单"，且这批新闻里有描述同一事件的报道，必须复用清单里给出的event_id，禁止为同一事件重新生成新的event_id；只有确认是清单里没有的全新事件时，才创建新的event_id。
-6. impact_scope_level (string): global / multi_region / regional / country / industry / company / limited
-7. impact_degree_level (string): very_high / high / medium / low
+3. content_nature (string): 只能是 "event" 或 "commentary" 之一——判断标准是"有没有具体发生的、可验证的事情"：
+   - event（具体事件）：财报发布、并购交易、监管决定/立法、宏观数据发布（GDP/CPI/非农等）、央行决议、地缘冲突/制裁、重大人事变动、产品/合作官宣、分析师给出具体评级或目标价调整（这是分析师做出的一个具体动作）、某次财报/交易/决定引发的股价异动报道。
+   - commentary（评论/分析类软文）：没有具体新发生的事情，只是某人对某只股票/某个趋势发表看法、预测、归因解读（"为什么XX在涨/跌"这类事后总结）、投资建议、"这些股票值得关注"式清单体、人物访谈里泛泛而谈的观点。
+   判断关键：这篇报道的核心是"发生了什么"还是"有人怎么看"。如果标题和内容主要是评论、预测、解读、推荐，而不是描述一件新发生的具体事情，判定为commentary，即使话题是知名公司或热门趋势。
+4. core_fact (string): 严谨客观总结输入新闻中的核心事实，禁止编造。
+5. market_impact_reason (string): 说明为何影响市场。
+6. event_id (string): 简短的核心事件统一标识符，用于归并同类报道。如果本次请求提供了"已知事件清单"，且这批新闻里有描述同一事件的报道，必须复用清单里给出的event_id，禁止为同一事件重新生成新的event_id；只有确认是清单里没有的全新事件时，才创建新的event_id。
+7. impact_scope_level (string): global / multi_region / regional / country / industry / company / limited
+8. impact_degree_level (string): very_high / high / medium / low
 
 【输出格式】
 必须严格输出合法 JSON 格式对象，不要输出任何 Markdown 标记或额外说明：
@@ -129,6 +133,7 @@ SYSTEM_PROMPT = """你是一个金融市场新闻分析引擎。
       "market_relevant": true,
       "event_type": "事件类型简述",
       "category": "分类",
+      "content_nature": "event",
       "core_fact": "核心事实简述",
       "market_impact_reason": "影响逻辑",
       "event_id": "event_identifier",
@@ -540,6 +545,7 @@ def analyze_news_list(articles):
             "market_relevant": bool(ai_data.get("market_relevant", False)),
             "event_type": ai_data.get("event_type", ""),
             "category": ai_data.get("category", "公司、行业与研报"),
+            "content_nature": ai_data.get("content_nature", "event"),
             "core_fact": ai_data.get("core_fact", article.get("summary", "")),
             "market_impact_reason": ai_data.get("market_impact_reason", ""),
             "event_id": ai_data.get("event_id", ""),
