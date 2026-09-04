@@ -123,6 +123,10 @@ SYSTEM_PROMPT = """你是一个金融市场新闻分析引擎。
 6. event_id (string): 简短的核心事件统一标识符，用于归并同类报道。如果本次请求提供了"已知事件清单"，且这批新闻里有描述同一事件的报道，必须复用清单里给出的event_id，禁止为同一事件重新生成新的event_id；只有确认是清单里没有的全新事件时，才创建新的event_id。
 7. impact_scope_level (string): global / multi_region / regional / country / industry / company / limited
 8. impact_degree_level (string): very_high / high / medium / low
+9. equity_relevance (string): 只能是 "direct"、"indirect"、"weak" 之一——判断这件事跟股票定价的关联紧密程度：
+   - direct（直接催化剂）：核心央行利率决议、头部权重股（如美股Mag7/行业龙头）财报与指引、印花税/交易规则调整、突发战争导致能源价格暴涨等直接改变市场定价或流动性预期的事件。
+   - indirect（间接影响）：行业板块政策变化（如半导体出口管制、医药集采）、大宗商品大幅波动、中型公司重组并购——对市场有影响但不是最直接的催化剂。
+   - weak（弱相关/噪音）：非核心官员的例行发言、没有具体落地政策的框架性讲话、非上市公司的动态、跟股票定价关系疏远的内容。
 
 【输出格式】
 必须严格输出合法 JSON 格式对象，不要输出任何 Markdown 标记或额外说明：
@@ -138,7 +142,8 @@ SYSTEM_PROMPT = """你是一个金融市场新闻分析引擎。
       "market_impact_reason": "影响逻辑",
       "event_id": "event_identifier",
       "impact_scope_level": "global",
-      "impact_degree_level": "high"
+      "impact_degree_level": "high",
+      "equity_relevance": "direct"
     }
   ]
 }
@@ -546,6 +551,7 @@ def analyze_news_list(articles):
             "event_type": ai_data.get("event_type", ""),
             "category": ai_data.get("category", "公司、行业与研报"),
             "content_nature": ai_data.get("content_nature", "event"),
+            "equity_relevance": ai_data.get("equity_relevance", "indirect"),
             "core_fact": ai_data.get("core_fact", article.get("summary", "")),
             "market_impact_reason": ai_data.get("market_impact_reason", ""),
             "event_id": ai_data.get("event_id", ""),
