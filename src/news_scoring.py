@@ -507,6 +507,56 @@ def normalize_content_nature(value):
 
 
 # ============================================================
+# 标准化股市相关度
+#
+# direct（直接催化剂）/ indirect（间接影响）/ weak（弱相关/噪音）。
+#
+# 缺失或无法识别时默认indirect——中性值，不会触发classify_tier
+# 里的降级判断，跟这个文件其他字段"缺失不误伤"的默认取向一致。
+#
+# 注意：这个字段只用于分层判定表里的"降级"判断，不参与
+# calculate_score的100分制计分——跟content_nature一样，
+# 是类别判断，不是拿去加权/相乘的分数，避免重新引入线性加权
+# 让各维度互相"兑换"的老问题（比如来源分高就能把低程度新闻
+# 顶进高权重区）。
+# ============================================================
+
+def normalize_equity_relevance(value):
+
+    if value is None:
+
+        return "indirect"
+
+
+    value = str(
+        value
+    ).strip().lower()
+
+
+    aliases = {
+
+        "direct":
+            "direct",
+
+        "indirect":
+            "indirect",
+
+        "weak":
+            "weak",
+
+        "noise":
+            "weak",
+
+    }
+
+
+    return aliases.get(
+        value,
+        "indirect"
+    )
+
+
+# ============================================================
 # 影响范围评分
 # ============================================================
 
@@ -651,25 +701,46 @@ def calculate_score(article):
 # 这也符合项目一直坚持的原则："来源权威不能提高影响范围/程度"，
 # 这里做得更彻底：来源干脆不参与"要不要保留"的判断。
 #
-#                  very_high   high     medium      low
-# 分层判定表（v4：加入content_nature维度）
+# ============================================================
+# 分层阈值判定表
 #
-#                  very_high   high     medium      low
-#   广(global/     keep        keep*    keep*       low_weight
+# 用 (影响范围分组, 影响程度) 两个维度直接查表，
+# 判定这条新闻属于 "keep / low_weight / discard" 三档之一。
+#
+# 来源可信度不参与这个判定——
+# 一条新闻该不该进日报，只取决于AI判断的影响范围和影响程度，
+# 这也符合项目一直坚持的原则："来源权威不能提高影响范围/程度"，
+# 这里做得更彻底：来源干脆不参与"要不要保留"的判断。
+#
+# 分层判定表（v5：medium档收紧 + 加入equity_relevance降级）
+#
+#                  very_high   high     medium
+#   广(global/     keep        keep*    low_weight
 #   multi_region)
-#   中(regional/   keep        keep*    low_weight  low_weight
+#   中(regional/   keep        keep*    low_weight
 #   country)
-#   窄(industry/   keep        keep*    low_weight  discard
+#   窄(industry/   keep        keep*    low_weight（degree=low时discard）
 #   company/
 #   limited)
 #
-#   * 标了星号的格子，如果content_nature=commentary（评论/分析类
-#     软文，不是具体发生的事件），降级为low_weight，不再无条件保留。
-#     very_high这一行不受影响——真正的黑天鹅级别，不该因为
-#     报道形式是评论就被压低。
+#   * 标了星号的格子，如果 content_nature=commentary（评论/分析类
+#     软文，不是具体发生的事件）或者 equity_relevance=weak
+#     （跟股票定价关系疏远），降级为low_weight，不再无条件保留。
+#     两个条件任一命中就降级。
+#     very_high这一行不受两者影响——真正的黑天鹅级别，
+#     不该因为报道形式或相关度评级就被压低。
 #
-# 单调性：影响范围或影响程度任一维度更高，判定结果绝不会更差
-#（content_nature=commentary时的降级例外）。
+#   v5改动：degree=medium不再有"BROAD scope例外"，
+#   不管范围是不是全球，medium程度统一进低权重池排队——
+#   之前"全球+medium=无条件保留"这个格子太松，大量"油价涨了
+#   几美元""某国货币走强"这类日常波动报道能不受限制地
+#   涌进日报，收紧之后只有真正high/very_high程度的事件
+#   才无条件保留。
+#
+# 注意：content_nature 和 equity_relevance 都只用于"降级"，
+# 不会把本来该进低权重池的新闻"升级"成无条件保留——
+# 这两个维度是质量闸门，不是加分项，避免重新引入"某个维度
+# 分高就能把新闻顶进高权重区"的线性加权老问题。
 #
 # 三档含义：
 #
@@ -701,24 +772,34 @@ def classify_tier(article):
         )
     )
 
+    equity_relevance = normalize_equity_relevance(
+        article.get(
+            "equity_relevance"
+        )
+    )
+
     is_commentary = content_nature == "commentary"
 
+    is_weak_relevance = equity_relevance == "weak"
 
-    # very_high：任意范围，无条件保留，不受content_nature影响——
-    # 真正的黑天鹅级别不该因为报道形式是评论就被压低
+
+    # very_high：任意范围，无条件保留，不受content_nature/
+    # equity_relevance影响——真正的黑天鹅级别不该因为
+    # 报道形式或相关度评级就被压低
     if degree == "very_high":
 
         return "keep"
 
 
-    # high：默认无条件保留，但如果是评论/分析类软文
-    # （不是具体发生的事件，只是有人对某个话题发表看法），
-    # 降级为低权重池排队，不再自动进日报——
-    # 这是本版新增的过滤，专门针对"分析师觉得XX能翻倍"
-    # 这类哪怕话题热门、AI给的程度评级也偏高的软文噪音。
+    # high：默认无条件保留，但满足以下任一条件就降级为
+    # 低权重池排队，不再自动进日报：
+    #   1. content_nature=commentary（评论/分析类软文，
+    #      不是具体发生的事件）
+    #   2. equity_relevance=weak（跟股票定价关系疏远，
+    #      比如非核心官员例行发言、无具体落地政策的框架性讲话）
     if degree == "high":
 
-        if is_commentary:
+        if is_commentary or is_weak_relevance:
 
             return "low_weight"
 
@@ -728,11 +809,7 @@ def classify_tier(article):
 
     if degree == "medium":
 
-        if scope in BROAD_SCOPES and not is_commentary:
-
-            return "keep"
-
-
+        # v5：不再有BROAD scope例外，medium程度一律进低权重池
         return "low_weight"
 
 
@@ -766,6 +843,12 @@ def prepare_article(article):
     article.setdefault(
         "content_nature",
         "event"
+    )
+
+
+    article.setdefault(
+        "equity_relevance",
+        "indirect"
     )
 
 
@@ -1423,4 +1506,3 @@ def score_single_article(
 
 
     return article
-    
