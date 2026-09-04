@@ -296,6 +296,8 @@ if __name__ == "__main__":
             print(f"来源：{article.get('source', '未知')}")
             print(f"时间：{article.get('published', '时间缺失')}")
             print(f"事件类型：{article.get('event_type', '未知')}")
+            print(f"内容性质：{article.get('content_nature', '未知')}")
+            print(f"股市相关度：{article.get('equity_relevance', '未知')}")
             print(f"影响范围：{article.get('impact_scope', 0)}")
             print(f"影响程度：{article.get('impact_degree', 0)}")
             print(f"来源可信度：{article.get('source_credibility', 0)}")
