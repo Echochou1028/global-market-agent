@@ -67,9 +67,11 @@ MODEL_FALLBACK = [
 
 MAX_ARTICLES_PER_BATCH = 10
 TOKEN_SAFETY_LIMIT = 7500
-OUTPUT_TOKENS_PER_ARTICLE = 220
-MIN_OUTPUT_TOKEN_RESERVE = 1200
-MAX_OUTPUT_TOKEN_RESERVE = 2500
+# 新增title_zh（标题中文翻译）字段后，每条新闻的输出内容变长了，
+# 相应上调预算，避免更容易触发finish_reason=length截断重试。
+OUTPUT_TOKENS_PER_ARTICLE = 260
+MIN_OUTPUT_TOKEN_RESERVE = 1400
+MAX_OUTPUT_TOKEN_RESERVE = 2800
 
 MAX_RETRIES = 2
 RETRY_DELAY_SECONDS = 2
@@ -108,22 +110,32 @@ def get_client():
 SYSTEM_PROMPT = """你是一个金融市场新闻分析引擎。
 任务：分析输入的新闻，提取关键市场信息，判断其对金融市场的实际影响。
 
+【输出语言】
+无论输入新闻原文是什么语言（英文、中文或其他），title_zh、event_type、
+core_fact、market_impact_reason 这几个自由文本字段必须用中文输出——
+title_zh是标题的中文翻译，其余是翻译/概括成中文，都不能直接照抄英文
+原文，也不能中英混杂。category、content_nature、equity_relevance、
+impact_scope_level、impact_degree_level 这几个字段仍然只能使用规定的
+英文枚举值，不受这条语言要求影响。event_id 保持简短的英文/拼音风格
+标识符即可，不需要是中文。
+
 【判断标准】
-1. market_relevant (boolean): 是否对股市、债市、外汇、大宗商品、加密货币、重要宏观/行业具有实际金融市场影响。娱乐/社会/无市场价值的新闻设为 false。
-2. category (string): 只能属于以下三类之一：
+1. title_zh (string): 把输入新闻的标题翻译成中文。是标题的翻译，不是摘要或改写——保留原标题的新闻价值和语气，只是把语言换成中文。如果原标题本来就是中文，直接原样返回即可。
+2. market_relevant (boolean): 是否对股市、债市、外汇、大宗商品、加密货币、重要宏观/行业具有实际金融市场影响。娱乐/社会/无市场价值的新闻设为 false。
+3. category (string): 只能属于以下三类之一：
    - 宏观、政策与地缘 (央行/利率/通胀/就业/GDP/关税/地缘政治)
    - 市场与资产 (股市大盘/大宗商品/外汇/虚拟货币剧烈波动)
    - 公司、行业与研报 (重要财报/并购/科技半导体AI产业/重磅研报)
-3. content_nature (string): 只能是 "event" 或 "commentary" 之一——判断标准是"有没有具体发生的、可验证的事情"：
+4. content_nature (string): 只能是 "event" 或 "commentary" 之一——判断标准是"有没有具体发生的、可验证的事情"：
    - event（具体事件）：财报发布、并购交易、监管决定/立法、宏观数据发布（GDP/CPI/非农等）、央行决议、地缘冲突/制裁、重大人事变动、产品/合作官宣、分析师给出具体评级或目标价调整（这是分析师做出的一个具体动作）、某次财报/交易/决定引发的股价异动报道。
    - commentary（评论/分析类软文）：没有具体新发生的事情，只是某人对某只股票/某个趋势发表看法、预测、归因解读（"为什么XX在涨/跌"这类事后总结）、投资建议、"这些股票值得关注"式清单体、人物访谈里泛泛而谈的观点。
    判断关键：这篇报道的核心是"发生了什么"还是"有人怎么看"。如果标题和内容主要是评论、预测、解读、推荐，而不是描述一件新发生的具体事情，判定为commentary，即使话题是知名公司或热门趋势。
-4. core_fact (string): 严谨客观总结输入新闻中的核心事实，禁止编造。
-5. market_impact_reason (string): 说明为何影响市场。
-6. event_id (string): 简短的核心事件统一标识符，用于归并同类报道。如果本次请求提供了"已知事件清单"，且这批新闻里有描述同一事件的报道，必须复用清单里给出的event_id，禁止为同一事件重新生成新的event_id；只有确认是清单里没有的全新事件时，才创建新的event_id。
-7. impact_scope_level (string): global / multi_region / regional / country / industry / company / limited
-8. impact_degree_level (string): very_high / high / medium / low
-9. equity_relevance (string): 只能是 "direct"、"indirect"、"weak" 之一——判断这件事跟股票定价的关联紧密程度：
+5. core_fact (string): 严谨客观总结输入新闻中的核心事实，禁止编造。
+6. market_impact_reason (string): 说明为何影响市场。
+7. event_id (string): 简短的核心事件统一标识符，用于归并同类报道。如果本次请求提供了"已知事件清单"，且这批新闻里有描述同一事件的报道，必须复用清单里给出的event_id，禁止为同一事件重新生成新的event_id；只有确认是清单里没有的全新事件时，才创建新的event_id。
+8. impact_scope_level (string): global / multi_region / regional / country / industry / company / limited
+9. impact_degree_level (string): very_high / high / medium / low
+10. equity_relevance (string): 只能是 "direct"、"indirect"、"weak" 之一——判断这件事跟股票定价的关联紧密程度：
    - direct（直接催化剂）：核心央行利率决议、头部权重股（如美股Mag7/行业龙头）财报与指引、印花税/交易规则调整、突发战争导致能源价格暴涨等直接改变市场定价或流动性预期的事件。
    - indirect（间接影响）：行业板块政策变化（如半导体出口管制、医药集采）、大宗商品大幅波动、中型公司重组并购——对市场有影响但不是最直接的催化剂。
    - weak（弱相关/噪音）：非核心官员的例行发言、没有具体落地政策的框架性讲话、非上市公司的动态、跟股票定价关系疏远的内容。
@@ -134,6 +146,7 @@ SYSTEM_PROMPT = """你是一个金融市场新闻分析引擎。
   "results": [
     {
       "id": 1,
+      "title_zh": "标题的中文翻译",
       "market_relevant": true,
       "event_type": "事件类型简述",
       "category": "分类",
@@ -548,6 +561,7 @@ def analyze_news_list(articles):
         article = dict(original_article)
         article.update({
             "market_relevant": bool(ai_data.get("market_relevant", False)),
+            "title_zh": ai_data.get("title_zh") or article.get("title", ""),
             "event_type": ai_data.get("event_type", ""),
             "category": ai_data.get("category", "公司、行业与研报"),
             "content_nature": ai_data.get("content_nature", "event"),
