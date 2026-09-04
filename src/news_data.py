@@ -58,6 +58,11 @@ NEWS_FEEDS = {
     # 高稳定性主流财经信源（替代失效的Reuters Business与WSJ Markets）
     "Yahoo Finance": "https://finance.yahoo.com/news/rssindex",
     "Investing.com News": "https://www.investing.com/rss/news.rss",
+
+    # 中国相关信源（已核实原生RSS，不依赖RSSHub）
+    "SCMP Business": "https://www.scmp.com/rss/92/feed",
+    "Xinhua Business": "http://www.xinhuanet.com/english/rss/businessrss.xml",
+
     # Google News Finance 已移除：q参数里 allinurl: 不是Google News
     # 搜索的标准操作符，AND/OR混用又没加括号，语法本身就有问题，
     # 这也是它一直返回0条的更可能原因（不是"没新闻"）。
@@ -291,7 +296,7 @@ if __name__ == "__main__":
     else:
         for index, article in enumerate(news, 1):
             print(f"{index}. 【{article.get('category', '未分类')}】")
-            print(f"标题：{article.get('title', '')}")
+            print(f"标题：{article.get('title_zh') or article.get('title', '')}")
             print(f"核心事实：{article.get('core_fact') or article.get('summary', '')}")
             print(f"来源：{article.get('source', '未知')}")
             print(f"时间：{article.get('published', '时间缺失')}")
