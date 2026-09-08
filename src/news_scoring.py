@@ -165,6 +165,8 @@ SOURCE_CREDIBILITY = {
 
     "SCMP Business": 18,
     "Xinhua Business": 18,
+    "FT中文网": 19,
+    "界面新闻": 17,
 
 }
 
