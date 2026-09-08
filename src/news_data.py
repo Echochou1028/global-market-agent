@@ -26,7 +26,35 @@ from news_scoring import select_news
 # 本文件现在直接使用它的输出，不再做第二遍过滤。
 # ============================================================
 
-NEWS_WINDOW_HOURS = 36
+# ============================================================
+# 新闻时间窗口
+#
+# 项目只在工作日运行（cron 配置见 daily_report.yml，
+# 限制在周一到周五触发，周末不跑）。
+#
+# 窗口按"今天是周几"动态决定，而不是固定值：
+#
+# 周二~周五：过去24小时（等于"上一次运行到这一次运行"之间，
+#            不重不漏）
+# 周一：     过去72小时（覆盖周五运行时间点到周一运行时间点
+#            之间的完整空窗——周五、周六、周日三天）
+# ============================================================
+
+def get_news_window_hours(now=None):
+
+    if now is None:
+        now = datetime.now(timezone.utc)
+
+    china_tz = timezone(timedelta(hours=8))
+
+    now_china = now.astimezone(china_tz)
+
+    # Python的weekday()：周一=0，周二=1，...，周日=6
+    if now_china.weekday() == 0:
+
+        return 72
+
+    return 24
 
 
 # ============================================================
@@ -62,6 +90,19 @@ NEWS_FEEDS = {
     # 中国相关信源（已核实原生RSS，不依赖RSSHub）
     "SCMP Business": "https://www.scmp.com/rss/92/feed",
     "Xinhua Business": "http://www.xinhuanet.com/english/rss/businessrss.xml",
+
+    # FT中文网——金融时报中文版，专注中国商业财经报道。
+    # 官方RSS（非第三方代理生成），但这次没能用平时的方式
+    # 亲自抓取验证（工具对该域名有访问限制），置信度比上面
+    # 几个低一档——下一轮日志出来后需要确认这个信源真的有
+    # 产出，没有的话就拿掉。
+    "FT中文网": "http://www.ftchinese.com/rss/news",
+
+    # 界面新闻——已直接抓取验证，实时内容高度聚焦中国市场
+    # （海关出口数据、A股ETF动态、央行黄金储备等），
+    # 是全站新闻（混杂娱乐/旅游等无关内容），market_relevant
+    # 判断会自动过滤掉不相关的部分。
+    "界面新闻": "https://a.jiemian.com/index.php?m=article&a=rss",
 
     # Google News Finance 已移除：q参数里 allinurl: 不是Google News
     # 搜索的标准操作符，AND/OR混用又没加括号，语法本身就有问题，
@@ -138,11 +179,18 @@ def format_publish_time(dt):
 def get_raw_news():
     articles = []
     seen_urls = set()
-    since = datetime.now(timezone.utc) - timedelta(hours=NEWS_WINDOW_HOURS)
+
+    now = datetime.now(timezone.utc)
+    window_hours = get_news_window_hours(now)
+    since = now - timedelta(hours=window_hours)
+
+    china_tz = timezone(timedelta(hours=8))
+    weekday_names = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+    today_name = weekday_names[now.astimezone(china_tz).weekday()]
 
     print("\n============================================================")
     print("开始获取全球金融市场新闻")
-    print(f"新闻时间窗口：最近 {NEWS_WINDOW_HOURS} 小时")
+    print(f"今天：{today_name}，新闻时间窗口：最近 {window_hours} 小时")
     print("============================================================")
 
     for source, url in NEWS_FEEDS.items():
