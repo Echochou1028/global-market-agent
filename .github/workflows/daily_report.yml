@@ -170,12 +170,13 @@ jobs:
       # 复用已经算好的 news 结果，不会重新触发一遍AI分析。
       #
       # 需要在仓库 Settings → Secrets and variables → Actions
-      # 里配置以下三个 Secrets：
-      #   SMTP_USERNAME  发信账号，例如 jessychou01@163.com
-      #   SMTP_PASSWORD  163邮箱的"授权码"（不是登录密码，
-      #                  需要在163邮箱设置里单独开启SMTP服务
-      #                  并生成授权码）
-      #   SMTP_TO        收信地址，例如 jessychou1028@gmail.com
+      # 里配置以下三个 Secrets（同一个Gmail邮箱收发）：
+      #   SMTP_USERNAME  = jessychou1028@gmail.com
+      #   SMTP_PASSWORD  = Gmail的"应用专用密码"（16位，不是
+      #                    登录密码——需要先在Google账号开启
+      #                    两步验证，再去"应用专用密码"页面生成）
+      #   SMTP_TO        = jessychou1028@gmail.com（跟
+      #                    SMTP_USERNAME 一样，自己发给自己）
       # ======================================================
 
       - name: Run News Data
