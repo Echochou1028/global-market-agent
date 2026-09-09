@@ -161,16 +161,30 @@ jobs:
 
 
       # ======================================================
-      # 8. 运行新闻分析
+      # 8. 运行新闻分析 + 发送邮件
       #
-      # GROQ_API_KEY 从 GitHub Secrets 注入
-      # Python 中通过 os.getenv() 获取
+      # GROQ_API_KEY 从 GitHub Secrets 注入，Python 中通过
+      # os.getenv() 获取。
+      #
+      # 邮件发送在 news_data.py 的 __main__ 里同一次运行内完成，
+      # 复用已经算好的 news 结果，不会重新触发一遍AI分析。
+      #
+      # 需要在仓库 Settings → Secrets and variables → Actions
+      # 里配置以下三个 Secrets：
+      #   SMTP_USERNAME  发信账号，例如 jessychou01@163.com
+      #   SMTP_PASSWORD  163邮箱的"授权码"（不是登录密码，
+      #                  需要在163邮箱设置里单独开启SMTP服务
+      #                  并生成授权码）
+      #   SMTP_TO        收信地址，例如 jessychou1028@gmail.com
       # ======================================================
 
       - name: Run News Data
         env:
 
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          SMTP_TO: ${{ secrets.SMTP_TO }}
 
         run: |
 
