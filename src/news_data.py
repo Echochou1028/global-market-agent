@@ -6,6 +6,7 @@ import feedparser
 
 from ai_news_analyzer import analyze_news_list
 from news_scoring import select_news
+from send_email import send_report_email
 
 
 # ============================================================
@@ -73,7 +74,10 @@ NEWS_FEEDS = {
     # CNBC 系列（退回本对话最早验证过稳定的id格式——
     # search.cnbc.com/combinedlist 格式最近两次运行全部返回0条，
     # 不像是"没新闻"，更像是这个接口本身不稳定/已变化）
-    "CNBC Markets": "https://www.cnbc.com/id/15839135/device/rss/rss.html",
+    # CNBC 系列（"CNBC Markets"原来用的id=15839135其实是Earnings
+    # 财报专属源，不是市场行情——这才是它产出一直偏少的真正原因。
+    # 改成id=20409666，这是CNBC真正的"Market Insider"实时行情源。
+    "CNBC Markets": "https://www.cnbc.com/id/20409666/device/rss/rss.html",
     "CNBC Finance": "https://www.cnbc.com/id/10000664/device/rss/rss.html",
     "CNBC World News": "https://www.cnbc.com/id/100727362/device/rss/rss.html",
     "CNBC Top News": "https://www.cnbc.com/id/100003114/device/rss/rss.html",
@@ -357,3 +361,5 @@ if __name__ == "__main__":
             print(f"总分：{article.get('score', 0)}")
             print(f"原文：{article.get('url', '')}")
             print()
+
+    send_report_email(news)
