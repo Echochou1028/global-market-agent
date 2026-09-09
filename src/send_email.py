@@ -32,7 +32,7 @@ def build_html_report(news):
 
         return f"""
         <html><body style="font-family: -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;">
-        <h2>全球金融市场日报 - {today_str}</h2>
+        <h2>全球金融市场事件 - {today_str}</h2>
         <p>今日未获取到有效的市场相关新闻（数据源异常，或AI分析失败被严格模式整体作废）。</p>
         </body></html>
         """
@@ -50,7 +50,7 @@ def build_html_report(news):
 
     html_parts = [f"""
     <html><body style="font-family: -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif; color:#222; max-width:720px; margin:0 auto;">
-    <h2 style="border-bottom:2px solid #333; padding-bottom:8px;">全球金融市场日报 - {today_str}</h2>
+    <h2 style="border-bottom:2px solid #333; padding-bottom:8px;">全球金融市场事件 - {today_str}</h2>
     <p style="color:#666; font-size:13px;">共 {len(news)} 条新闻</p>
     """]
 
@@ -131,7 +131,7 @@ def send_report_email(news):
 
     msg = MIMEMultipart("alternative")
 
-    msg["Subject"] = f"全球金融市场日报 {today_str}（共{len(news)}条）"
+    msg["Subject"] = f"全球金融市场事件 {today_str}（共{len(news)}条）"
     msg["From"] = smtp_username
     msg["To"] = smtp_to
 
